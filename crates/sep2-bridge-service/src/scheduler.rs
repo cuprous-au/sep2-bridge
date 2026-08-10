@@ -62,7 +62,7 @@ pub async fn task(
     let mut wait_task: Option<JoinHandle<_>> = None;
     let mut prior_next_events = Vec::new();
     let mut prior_next_scheduler_time = None;
-    let mut prior_setpoint = ControlAttributes::default();
+    let mut prior_parameters = ControlAttributes::default();
 
     while let Some(command) = input_ch.recv().await {
         match command {
@@ -87,27 +87,27 @@ pub async fn task(
 
         let now = Utc::now();
 
-        let cur_setpoint = match calc_setpoint(&model, device_lfdi, now) {
+        let cur_parameters = match calc_parameters(&model, device_lfdi, now) {
             Ok(x) => x,
             Err(err) => {
                 // We assume this is not a fatal error but will recover once a
                 // model update is applied.
-                log::warn!("Scheduler was unable to calculate setpoint: {}", err);
+                log::warn!("Scheduler was unable to calculate parameters: {}", err);
                 continue;
             }
         };
 
-        // If the setpoint changed send it out.
-        if cur_setpoint != prior_setpoint {
+        // If the parameters changed send it out.
+        if cur_parameters != prior_parameters {
             log::trace!(
-                "Found new setpoint with {} attributes",
-                cur_setpoint.num_active()
+                "Found new parameters with {} attributes",
+                cur_parameters.num_active()
             );
             output_ch
-                .broadcast(cur_setpoint.clone().into())
+                .broadcast(cur_parameters.clone().into())
                 .await
                 .map_err(|_| Error::ChannelClosed)?;
-            prior_setpoint = cur_setpoint;
+            prior_parameters = cur_parameters;
         }
 
         // Determine when the model state will next change.
@@ -160,22 +160,22 @@ fn load_persisted_state() -> Sep2Model {
     Sep2Model::default()
 }
 
-/// Determine the new setpoint given a time `now`.
-fn calc_setpoint(
+/// Determine the new parameters given a time `now`.
+fn calc_parameters(
     model: &Sep2Model,
     device_lfdi: HexBinary160,
     now: DateTime<Utc>,
 ) -> Result<ControlAttributes> {
     let i64_now = Int64(now.timestamp());
     let controls = model.all_controls_for_device(device_lfdi, i64_now)?;
-    calc_setpoint_for_controls(controls, i64_now)
+    calc_parameters_for_controls(controls, i64_now)
 }
 
-fn calc_setpoint_for_controls(
+fn calc_parameters_for_controls(
     controls: Vec<ControlRef>,
     i64_now: Int64,
 ) -> Result<ControlAttributes> {
-    let setpoint = controls
+    let parameters = controls
         .into_iter()
         // Filter out any controls that are not active right now
         .filter(|control| match control {
@@ -192,7 +192,7 @@ fn calc_setpoint_for_controls(
         // And project them down in the order given
         .fold(ControlAttributes::default(), |a, b| a.overlay_on(b));
 
-    Ok(setpoint)
+    Ok(parameters)
 }
 
 /// Return the reply_to address if it is given on the control and if the
@@ -209,8 +209,8 @@ fn reply_to_if_required(
 }
 
 /// Determines the next time for an event that might cause a change in the
-/// setpoint. Does not guarantee that an event will cause a change and expects
-/// the caller to calculate the setpoint at this new time when it is reached.
+/// parameters. Does not guarantee that an event will cause a change and expects
+/// the caller to calculate the parameters at this new time when it is reached.
 fn calc_next_schedule_time(
     model: &Sep2Model,
     device_lfdi: HexBinary160,
@@ -232,7 +232,7 @@ fn calc_next_schedule_time_for_controls(
 
     // Find the next control event that is happening in the future.
     // Not being fussy here - we might find events which won't change the
-    // setpoint because they are superseeded, but easier to be overeager than
+    // parameters because they are superseeded, but easier to be overeager than
     // carefully figuring out what might happen in the future.
     let all_future_events: Vec<(Int64, Option<Event>)> = controls
         .into_iter()
@@ -412,108 +412,109 @@ mod tests {
     }
 
     #[test]
-    fn setpoint_includes_only_active_controls() {
+    fn parameters_includes_only_active_controls() {
         // Calculating when there are only defaults
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
-        let setpoint =
-            calc_setpoint_for_controls(ordered_controls, data.time_only_defaults).unwrap();
-        assert_eq!(setpoint.base.op_mod_connect, Some(true));
+        let parameters =
+            calc_parameters_for_controls(ordered_controls, data.time_only_defaults).unwrap();
+        assert_eq!(parameters.base.op_mod_connect, Some(true));
         assert_eq!(
-            setpoint.base.op_mod_imp_lim_w,
+            parameters.base.op_mod_imp_lim_w,
             data.defaults[1].der_control_base.op_mod_imp_lim_w
         );
-        assert_eq!(setpoint.num_active(), 2);
+        assert_eq!(parameters.num_active(), 2);
 
         // Calculating when only the first is active
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
-        let setpoint =
-            calc_setpoint_for_controls(ordered_controls, data.time_first_active).unwrap();
-        assert_eq!(setpoint.base.op_mod_connect, Some(true));
+        let parameters =
+            calc_parameters_for_controls(ordered_controls, data.time_first_active).unwrap();
+        assert_eq!(parameters.base.op_mod_connect, Some(true));
         assert_eq!(
-            setpoint.base.op_mod_imp_lim_w,
+            parameters.base.op_mod_imp_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
                 .op_mod_imp_lim_w
         );
         assert_eq!(
-            setpoint.base.op_mod_gen_lim_w,
+            parameters.base.op_mod_gen_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
                 .op_mod_gen_lim_w
         );
-        assert_eq!(setpoint.num_active(), 3);
+        assert_eq!(parameters.num_active(), 3);
 
         // Calculating when all are active
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
-        let setpoint = calc_setpoint_for_controls(ordered_controls, data.time_all_active).unwrap();
-        assert_eq!(setpoint.base.op_mod_connect, Some(true));
+        let parameters =
+            calc_parameters_for_controls(ordered_controls, data.time_all_active).unwrap();
+        assert_eq!(parameters.base.op_mod_connect, Some(true));
         assert_eq!(
-            setpoint.base.op_mod_imp_lim_w,
+            parameters.base.op_mod_imp_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
                 .op_mod_imp_lim_w
         );
         assert_eq!(
-            setpoint.base.op_mod_gen_lim_w,
+            parameters.base.op_mod_gen_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
                 .op_mod_gen_lim_w
         );
         assert_eq!(
-            setpoint.base.op_mod_load_lim_w,
+            parameters.base.op_mod_load_lim_w,
             data.controls[1]
                 .der_control
                 .der_control_base
                 .op_mod_load_lim_w
         );
         assert_eq!(
-            setpoint.base.op_mod_target_w,
+            parameters.base.op_mod_target_w,
             data.controls[2]
                 .der_control
                 .der_control_base
                 .op_mod_target_w
         );
-        assert_eq!(setpoint.num_active(), 5);
+        assert_eq!(parameters.num_active(), 5);
 
         // Calculating when only the second are active
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
-        let setpoint =
-            calc_setpoint_for_controls(ordered_controls, data.time_second_active).unwrap();
-        assert_eq!(setpoint.base.op_mod_connect, Some(true));
+        let parameters =
+            calc_parameters_for_controls(ordered_controls, data.time_second_active).unwrap();
+        assert_eq!(parameters.base.op_mod_connect, Some(true));
         assert_eq!(
-            setpoint.base.op_mod_imp_lim_w,
+            parameters.base.op_mod_imp_lim_w,
             data.controls[1]
                 .der_control
                 .der_control_base
                 .op_mod_imp_lim_w
         );
         assert_eq!(
-            setpoint.base.op_mod_load_lim_w,
+            parameters.base.op_mod_load_lim_w,
             data.controls[1]
                 .der_control
                 .der_control_base
                 .op_mod_load_lim_w
         );
         assert_eq!(
-            setpoint.base.op_mod_target_w,
+            parameters.base.op_mod_target_w,
             data.controls[2]
                 .der_control
                 .der_control_base
                 .op_mod_target_w
         );
-        assert_eq!(setpoint.num_active(), 4);
+        assert_eq!(parameters.num_active(), 4);
     }
 
     #[test]
-    fn setpoint_combines_controls() {}
+    fn parameters_combines_controls() {}
 
     struct MockControls {
         controls: Vec<ScheduledControl>,
