@@ -4,8 +4,18 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-broadcast.workspace = true
+chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
+derive_more = { workspace = true, features = ["display"] }
 env_logger.workspace = true
+exponential-backoff.workspace = true
 git-version.workspace = true
 log.workspace = true
+rand.workspace = true
+sep2_client = { workspace = true, features = ["all"] }
+sep2_common = { workspace = true, features = ["all"] }
 tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+proptest = { workspace = true }

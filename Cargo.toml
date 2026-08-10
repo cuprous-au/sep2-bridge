@@ -7,15 +7,25 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+async-broadcast = "0.7.2"
 axum = "0.8.8"
 chrono = "0.4.38"
 clap = "4.5.60"
+derive_more = "2.1.1"
 env_logger = "0.11.9"
+exponential-backoff = "2.1.0"
 git-version = "0.3.9"
 log = "0.4.29"
+rand = "0.10.2"
 reqwest = "0.12"
+sep2_client = { git = "https://github.com/ethanndickson/sep2_client.git", rev = "cc86179b013517d0681130d1f7adc605aca2b95d" }
+sep2_common = "0.1.0"
 serde = "1"
 serde_json = "1"
 tokio = "1.50.0"
 tokio-util = "0.7.18"
 tower-http = "0.6"
+proptest = "1.6.0"
+
+[patch.crates-io]
+sep2_common = { git = "https://github.com/ethanndickson/sep2_common.git", rev = "c87adacf1fd6922f545475ddc60fdf6b1d3bf8f0" }
