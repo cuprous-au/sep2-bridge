@@ -1,29 +1,350 @@
-use std::{error::Error, net::SocketAddr, path::PathBuf};
-
+use async_broadcast::Receiver as BroadcastReceiver;
+use chrono::Utc;
 use clap::Parser;
+use derive_more::Display;
 use git_version::git_version;
+use sep2_client::{client::Client, device::SEDevice};
+use sep2_common::packages::{
+    der::{DERCapability, DERSettings, DERStatus},
+    primitives::Int64,
+    types::{DeviceCategoryType, PINType},
+};
+use std::{fs, path::PathBuf, time::Duration};
+use tokio::{
+    sync::mpsc::{self, Sender as MpscSender},
+    task::JoinSet,
+};
+
+mod scheduler;
+mod sep2_connection;
+
+use crate::sep2_connection::ControlResponse;
+
+#[derive(Debug, Display)]
+enum Error {
+    #[display("Device returned from server was not known to us")]
+    UnexpectedDevice,
+    #[display("Server rejected our update")]
+    ServerRejected,
+    #[display("Invalid input: {_0}")]
+    InvalidInput(String),
+    #[display("Item known by its href or MRID but can't be found in the model")]
+    ItemDetailsUnknown,
+    #[display("Channel was closed when trying to send.")]
+    ChannelClosed,
+}
+impl std::error::Error for Error {}
+type Result<T> = std::result::Result<T, Error>;
+
+/// Allows referencing types of sep2_common resources at runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Display)]
+pub enum ResourceKind {
+    Time,
+    EndDeviceList,
+    EndDevice,
+    FunctionSetAssignmentsList,
+    FunctionSetAssignments,
+    DERProgramList,
+    DERProgram,
+    DefaultDERControl,
+    DERControlList,
+    DERControl,
+}
 
 /// A bridge service that translates IEEE 2030.5 (SEP2) messages to and from external
 /// energy-system protocols and device interfaces.
 #[derive(Parser, Debug)]
 #[clap(author, about, long_about = None, version=git_version!())]
 pub struct Args {
-    /// A socket address for connecting to a sep2 server.
-    #[clap(env, long, default_value = "127.0.0.1:8080")]
-    server_addr: SocketAddr,
+    /// A path to the CA certificate we should use to validate the sep2 server's
+    /// certificate.
+    #[clap(env, long, value_parser = validate_file_exists, default_value = "/etc/sep2-bridge/ca.crt")]
+    ca_path: PathBuf,
 
-    /// A path to the certificate chain we should use when connecting to sep2.
-    #[clap(env, long, default_value = "/tmp")]
-    cert_path: PathBuf,
+    /// A path to a directory of credentials, including the client certificate
+    /// at `{credentials_directory}/client.crt` the client key at
+    /// `{credentials_directory}/client.key` and optionally a PIN at
+    /// `{credentials_path}/registration_pin`.
+    #[clap(env, long, value_parser = validate_path_exists)]
+    credentials_directory: PathBuf,
+
+    /// The location of the dcap entrypoint URI.
+    #[clap(env, long, default_value = "/dcap")]
+    dcap_uri: String,
+
+    /// An address for connecting to a sep2 server.
+    #[clap(env, long, default_value = "127.0.0.1:8080")]
+    server_addr: String,
+
+    /// The maximum number of elements to query for in a list. If more elements
+    /// are present, errors will be emitted and the service will continue as
+    /// best it is able to but may not poll all items it should. Note that SEP2
+    /// requires storing at least 24 DERControls so this list size should be
+    /// set larger.
+    #[clap(env, long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
+    max_list_size: u32,
+
+    /// The poll rate to use if the server does not specify a poll rate. It is
+    /// useful to modify this during testing.
+    #[clap(env, long, default_value_t = 900, value_parser = clap::value_parser!(u32).range(1..))]
+    default_poll_rate: u32,
 }
 
+fn validate_path_exists(input: &str) -> std::result::Result<PathBuf, String> {
+    let path = PathBuf::from(input);
+    if !path.exists() {
+        Err(format!("Cannot find path '{}'.", input))
+    } else {
+        Ok(path)
+    }
+}
+
+fn validate_file_exists(input: &str) -> std::result::Result<PathBuf, String> {
+    let path = validate_path_exists(input)?;
+    if !path.is_file() {
+        Err(format!("Path '{}' is not a file.", input))
+    } else {
+        Ok(path)
+    }
+}
+
+// Force a relatively quick tickrate for checking on polls. This time has to
+// be shorter than any possible poll rate.
+const POLL_TICKRATE: Duration = Duration::from_secs(5);
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     env_logger::builder().format_timestamp_millis().init();
 
     log::info!("sep2-bridge started. Connecting to {}.", args.server_addr);
 
+    let server_addr = if args.server_addr.starts_with("https://") {
+        args.server_addr
+    } else {
+        format!("https://{}", args.server_addr)
+    };
+    let cert_path = validate_file_exists(
+        &args
+            .credentials_directory
+            .join("client.crt")
+            .to_string_lossy(),
+    )
+    .map_err(|_| Error::InvalidInput(String::from("Client certificate not present")))?;
+    let key_path = validate_file_exists(
+        &args
+            .credentials_directory
+            .join("client.key")
+            .to_string_lossy(),
+    )
+    .map_err(|_| Error::InvalidInput(String::from("Client key not present")))?;
+    let client = Client::new_https(
+        &server_addr,
+        &cert_path,
+        &key_path,
+        &args.ca_path,
+        None,
+        Some(POLL_TICKRATE),
+    )
+    .expect("Could not create client");
+
+    let device_to_register = SEDevice::new_from_cert(&cert_path, DeviceCategoryType::all()).or(
+        // Fatal error - we can't continue.
+        Err(Error::InvalidInput(format!(
+            "Device could not be loaded from certificate at {}",
+            cert_path.display()
+        ))),
+    )?;
+
+    let lfdi = device_to_register.lfdi;
+    let sfdi = device_to_register.sfdi;
+    log::debug!("Our device LFDI: {}, SFDI: {}", lfdi, sfdi);
+
+    // If the user provided a credentials path then we expect a PIN to be present.
+    let expected_pin = load_pin(args.credentials_directory)?;
+
+    let mut join_set = JoinSet::new();
+
+    // Start the SEP2 connection management task.
+    let (sep2_conn_input_tx, sep2_conn_input_rx) = mpsc::channel(10);
+    let (sep2_conn_output_tx, sep2_conn_output_rx) = deactivated_broadcast(10);
+    join_set.spawn({
+        let sep2_conn_input_tx = sep2_conn_input_tx.clone();
+        async move {
+            sep2_connection::task(
+                sep2_conn_output_tx,
+                sep2_conn_input_rx,
+                sep2_conn_input_tx,
+                client,
+                sep2_connection::Sep2ConnectionArgs {
+                    dcap_uri: args.dcap_uri,
+                    max_list_size: args.max_list_size,
+                    default_poll_rate: args.default_poll_rate,
+                    device_to_register,
+                    expected_pin,
+                },
+            )
+            .await
+        }
+    });
+
+    // Start the scheduler task.
+    let (scheduler_input_tx, scheduler_input_rx) = mpsc::channel(10);
+    let (scheduler_output_tx, scheduler_output_rx) = deactivated_broadcast(10);
+    join_set.spawn(scheduler::task(
+        scheduler_output_tx,
+        scheduler_input_rx,
+        scheduler_input_tx.clone(),
+        lfdi,
+    ));
+
+    // Dispatch sep2_conn events to the right places.
+    join_set.spawn(sep2_connection_dispatcher(
+        sep2_conn_output_rx.activate_cloned(),
+        scheduler_input_tx.clone(),
+    ));
+
+    // Dispatch scheduler events to the right places.
+    join_set.spawn(scheduler_dispatcher(
+        scheduler_output_rx.activate_cloned(),
+        sep2_conn_input_tx.clone(),
+    ));
+
+    // Wake up the tasks to begin their work.
+    sep2_conn_input_tx
+        .send(sep2_connection::Command::Wake)
+        .await
+        .map_err(|_| Error::ChannelClosed)?;
+    scheduler_input_tx
+        .send(scheduler::Command::NextSchedule)
+        .await
+        .map_err(|_| Error::ChannelClosed)?;
+
+    // FIXME: Dummy status and capabilities for testing until we have devices sending info.
+    sep2_conn_input_tx
+        .send(sep2_connection::Command::SendDeviceCapability(
+            DERCapability::default(),
+        ))
+        .await
+        .map_err(|_| Error::ChannelClosed)?;
+    sep2_conn_input_tx
+        .send(sep2_connection::Command::SendDeviceStatus(
+            DERStatus::default(),
+        ))
+        .await
+        .map_err(|_| Error::ChannelClosed)?;
+    sep2_conn_input_tx
+        .send(sep2_connection::Command::SendDeviceSettings(
+            DERSettings::default(),
+        ))
+        .await
+        .map_err(|_| Error::ChannelClosed)?;
+
+    // TODO: Better handling of errors that should abort the entire process.
+    for result in join_set.join_all().await {
+        result?;
+    }
+
+    // TODO: Ensure we clean up and persist state before we exit.
+
     Ok(())
+}
+
+fn deactivated_broadcast<T>(
+    cap: usize,
+) -> (
+    async_broadcast::Sender<T>,
+    async_broadcast::InactiveReceiver<T>,
+) {
+    let (mut tx, rx) = async_broadcast::broadcast(cap);
+    let rx = rx.deactivate();
+    tx.set_await_active(false);
+
+    (tx, rx)
+}
+
+async fn sep2_connection_dispatcher(
+    mut sep2_conn_output: BroadcastReceiver<sep2_connection::Sep2ResourceEvent>,
+    scheduler_input: MpscSender<scheduler::Command>,
+) -> Result<()> {
+    while let Ok(event) = sep2_conn_output.recv().await {
+        scheduler_input
+            .send(scheduler::Command::ResourceUpdated(event))
+            .await
+            .map_err(|_| Error::ChannelClosed)?;
+    }
+    Err(Error::ChannelClosed)
+}
+
+async fn scheduler_dispatcher(
+    mut scheduler_output: BroadcastReceiver<scheduler::Event>,
+    sep2_conn_input: MpscSender<sep2_connection::Command>,
+) -> Result<()> {
+    while let Ok(event) = scheduler_output.recv().await {
+        match event {
+            scheduler::Event::LinkAdded { href, kind } => {
+                sep2_conn_input
+                    .send(sep2_connection::Command::SubscribeToResource { href, kind })
+                    .await
+                    .map_err(|_| Error::ChannelClosed)?;
+            }
+            scheduler::Event::LinkRemoved { href, kind: _ } => {
+                sep2_conn_input
+                    .send(sep2_connection::Command::UnsubscribeFromResource { href })
+                    .await
+                    .map_err(|_| Error::ChannelClosed)?;
+            }
+            scheduler::Event::DERControlStatusChanged {
+                subject,
+                status,
+                reply_to,
+            } => {
+                let now = Int64(Utc::now().timestamp());
+                sep2_conn_input
+                    .send(sep2_connection::Command::SendControlResponse(
+                        ControlResponse::new(subject, status, reply_to, now),
+                    ))
+                    .await
+                    .map_err(|_| Error::ChannelClosed)?;
+            }
+            scheduler::Event::ParametersChanged(_control_attributes) => {
+                // Ignore for now.
+            }
+        }
+    }
+
+    Err(Error::ChannelClosed)
+}
+
+fn load_pin(credentials_path: PathBuf) -> Result<Option<PINType>> {
+    let file_path = credentials_path.join("registration_pin");
+
+    if !file_path.exists() {
+        return Ok(None);
+    }
+    if !file_path.is_file() {
+        return Err(Error::InvalidInput(format!(
+            "'{}' is not a file",
+            file_path.to_string_lossy()
+        )));
+    }
+
+    let contents = fs::read_to_string(&file_path).map_err(|err| {
+        Error::InvalidInput(format!(
+            "Error reading from '{}': {}",
+            file_path.to_string_lossy(),
+            err
+        ))
+    })?;
+
+    let number = contents
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| Error::InvalidInput(String::from("Could not parse PIN")))?;
+
+    Some(PINType::new(number).ok_or(Error::InvalidInput(String::from(
+        "PIN is a number but not of the right size",
+    ))))
+    .transpose()
 }
