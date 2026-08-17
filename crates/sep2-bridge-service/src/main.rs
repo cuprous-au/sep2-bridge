@@ -5,7 +5,6 @@ use derive_more::Display;
 use git_version::git_version;
 use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::packages::{
-    der::{DERCapability, DERSettings, DERStatus},
     primitives::Int64,
     types::{DeviceCategoryType, PINType},
 };
@@ -14,11 +13,15 @@ use tokio::{
     sync::mpsc::{self, Sender as MpscSender},
     task::JoinSet,
 };
+use url::Url;
 
+mod modbus_connection;
 mod scheduler;
 mod sep2_connection;
+mod translation;
 
-use crate::sep2_connection::ControlResponse;
+use crate::{modbus_connection::Transport as ModbusTransport, sep2_connection::ControlResponse};
+use translation::TryConvert;
 
 #[derive(Debug, Display)]
 enum Error {
@@ -88,6 +91,15 @@ pub struct Args {
     /// useful to modify this during testing.
     #[clap(env, long, default_value_t = 900, value_parser = clap::value_parser!(u32).range(1..))]
     default_poll_rate: u32,
+
+    /// The device id for the modbus connection to distinguish between other devices.
+    #[clap(env, long, default_value_t = 1)]
+    modbus_device_id: u8,
+
+    /// The address to use for the modbus connection. A scheme prefix is
+    /// required, one of unix://, tcp://, ...
+    #[clap(env, long, value_parser = parse_modbus_socket)]
+    modbus_socket: ModbusTransport,
 }
 
 fn validate_path_exists(input: &str) -> std::result::Result<PathBuf, String> {
@@ -106,6 +118,60 @@ fn validate_file_exists(input: &str) -> std::result::Result<PathBuf, String> {
     } else {
         Ok(path)
     }
+}
+
+fn parse_modbus_socket(value: &str) -> std::result::Result<ModbusTransport, String> {
+    match Url::parse(value) {
+        Err(_) => Err(String::from("Unable to parse URL.")),
+        Ok(url) => match url.scheme() {
+            "unix" => {
+                if url.username() != ""
+                    || url.password().is_some()
+                    || url.host_str().is_some()
+                    || url.port().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    Err(String::from("Unexpected parts of URL present."))
+                } else {
+                    Ok(ModbusTransport::Unix(PathBuf::from(url.path())))
+                }
+            }
+            scheme => Err(format!("Unknown modbus socket scheme '{scheme}'")),
+        },
+    }
+}
+
+fn load_pin(credentials_path: PathBuf) -> Result<Option<PINType>> {
+    let file_path = credentials_path.join("registration_pin");
+
+    if !file_path.exists() {
+        return Ok(None);
+    }
+    if !file_path.is_file() {
+        return Err(Error::InvalidInput(format!(
+            "'{}' is not a file",
+            file_path.to_string_lossy()
+        )));
+    }
+
+    let contents = fs::read_to_string(&file_path).map_err(|err| {
+        Error::InvalidInput(format!(
+            "Error reading from '{}': {}",
+            file_path.to_string_lossy(),
+            err
+        ))
+    })?;
+
+    let number = contents
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| Error::InvalidInput(String::from("Could not parse PIN")))?;
+
+    Some(PINType::new(number).ok_or(Error::InvalidInput(String::from(
+        "PIN is a number but not of the right size",
+    ))))
+    .transpose()
 }
 
 // Force a relatively quick tickrate for checking on polls. This time has to
@@ -199,15 +265,35 @@ async fn main() -> Result<()> {
         lfdi,
     ));
 
+    // Start the modbus task.
+    let (modbus_input_tx, modbus_input_rx) = mpsc::channel(10);
+    let (modbus_output_tx, modbus_output_rx) = deactivated_broadcast(10);
+    join_set.spawn(modbus_connection::task(
+        modbus_output_tx,
+        modbus_input_rx,
+        args.modbus_socket,
+        args.modbus_device_id,
+    ));
+
     // Dispatch sep2_conn events to the right places.
-    join_set.spawn(sep2_connection_dispatcher(
+    join_set.spawn(resource_update_dispatcher(
         sep2_conn_output_rx.activate_cloned(),
         scheduler_input_tx.clone(),
     ));
 
     // Dispatch scheduler events to the right places.
-    join_set.spawn(scheduler_dispatcher(
+    join_set.spawn(sep2_subscription_and_notification_dispatcher(
         scheduler_output_rx.activate_cloned(),
+        sep2_conn_input_tx.clone(),
+    ));
+    join_set.spawn(control_change_dispatcher(
+        scheduler_output_rx.activate_cloned(),
+        modbus_input_tx.clone(),
+    ));
+
+    // Dispatch modbus_conn events to the right places.
+    join_set.spawn(sep2_device_state_dispatcher(
+        modbus_output_rx.activate_cloned(),
         sep2_conn_input_tx.clone(),
     ));
 
@@ -218,26 +304,6 @@ async fn main() -> Result<()> {
         .map_err(|_| Error::ChannelClosed)?;
     scheduler_input_tx
         .send(scheduler::Command::NextSchedule)
-        .await
-        .map_err(|_| Error::ChannelClosed)?;
-
-    // FIXME: Dummy status and capabilities for testing until we have devices sending info.
-    sep2_conn_input_tx
-        .send(sep2_connection::Command::SendDeviceCapability(
-            DERCapability::default(),
-        ))
-        .await
-        .map_err(|_| Error::ChannelClosed)?;
-    sep2_conn_input_tx
-        .send(sep2_connection::Command::SendDeviceStatus(
-            DERStatus::default(),
-        ))
-        .await
-        .map_err(|_| Error::ChannelClosed)?;
-    sep2_conn_input_tx
-        .send(sep2_connection::Command::SendDeviceSettings(
-            DERSettings::default(),
-        ))
         .await
         .map_err(|_| Error::ChannelClosed)?;
 
@@ -264,7 +330,9 @@ fn deactivated_broadcast<T>(
     (tx, rx)
 }
 
-async fn sep2_connection_dispatcher(
+/// Reacts to updates for SEP2 resources and forwards those to the scheduler to
+/// update its internal model.
+async fn resource_update_dispatcher(
     mut sep2_conn_output: BroadcastReceiver<sep2_connection::Sep2ResourceEvent>,
     scheduler_input: MpscSender<scheduler::Command>,
 ) -> Result<()> {
@@ -277,7 +345,9 @@ async fn sep2_connection_dispatcher(
     Err(Error::ChannelClosed)
 }
 
-async fn scheduler_dispatcher(
+/// Reacts to new polls required and old polls to be removed as well as
+/// notifications on control status changes.
+async fn sep2_subscription_and_notification_dispatcher(
     mut scheduler_output: BroadcastReceiver<scheduler::Event>,
     sep2_conn_input: MpscSender<sep2_connection::Command>,
 ) -> Result<()> {
@@ -308,8 +378,8 @@ async fn scheduler_dispatcher(
                     .await
                     .map_err(|_| Error::ChannelClosed)?;
             }
-            scheduler::Event::ParametersChanged(_control_attributes) => {
-                // Ignore for now.
+            scheduler::Event::ParametersChanged(_) => {
+                // Ignore changed parameters
             }
         }
     }
@@ -317,34 +387,96 @@ async fn scheduler_dispatcher(
     Err(Error::ChannelClosed)
 }
 
-fn load_pin(credentials_path: PathBuf) -> Result<Option<PINType>> {
-    let file_path = credentials_path.join("registration_pin");
-
-    if !file_path.exists() {
-        return Ok(None);
+/// Reacts to changes in the currently applied controls from the scheduler and
+/// sends these as commands to the modbus task.
+async fn control_change_dispatcher(
+    mut scheduler_output: BroadcastReceiver<scheduler::Event>,
+    modbus_input: MpscSender<modbus_connection::Command>,
+) -> Result<()> {
+    while let Ok(event) = scheduler_output.recv().await {
+        match event {
+            scheduler::Event::ParametersChanged(control_attributes) => {
+                match (*control_attributes).clone().try_convert() {
+                    Ok(modbus_parameters) => {
+                        modbus_input
+                            .send(modbus_connection::Command::UpdateParameters(
+                                modbus_parameters,
+                            ))
+                            .await
+                            .map_err(|_| Error::ChannelClosed)?;
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to translate SEP2 controls to modbus parameters: {err}");
+                    }
+                }
+            }
+            scheduler::Event::LinkAdded { .. }
+            | scheduler::Event::LinkRemoved { .. }
+            | scheduler::Event::DERControlStatusChanged { .. } => {
+                // Ignore these events
+            }
+        }
     }
-    if !file_path.is_file() {
-        return Err(Error::InvalidInput(format!(
-            "'{}' is not a file",
-            file_path.to_string_lossy()
-        )));
+
+    Err(Error::ChannelClosed)
+}
+
+/// Reacts to events from the modbus task indicating a change in the device
+/// state and send those as commands to the SEP2 task.
+async fn sep2_device_state_dispatcher(
+    mut modbus_output: BroadcastReceiver<modbus_connection::Event>,
+    sep2_conn_input: MpscSender<sep2_connection::Command>,
+) -> Result<()> {
+    while let Ok(event) = modbus_output.recv().await {
+        match event {
+            // Note: for each of these, we can potentially fail conversion from
+            // modbus to SEP2 translation. In that case, we log a warning and do
+            // not pass the message along but continue otherwise.
+            modbus_connection::Event::CapabilitiesPolled(cap) => match cap.try_convert() {
+                Ok(der_capability) => {
+                    sep2_conn_input
+                        .send(sep2_connection::Command::SendDeviceCapability(
+                            der_capability,
+                        ))
+                        .await
+                        .map_err(|_| Error::ChannelClosed)?;
+                }
+                Err(err) => {
+                    log::warn!(
+                        "Failed to translate modbus device capabilities to SEP2 DERCapability: {err}"
+                    );
+                }
+            },
+            modbus_connection::Event::StatePolled(status, settings) => {
+                match status.try_convert() {
+                    Ok(der_status) => {
+                        sep2_conn_input
+                            .send(sep2_connection::Command::SendDeviceStatus(der_status))
+                            .await
+                            .map_err(|_| Error::ChannelClosed)?;
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "Failed to translate modbus device status to SEP2 DERStatus: {err}"
+                        );
+                    }
+                };
+                match settings.try_convert() {
+                    Ok(der_settings) => {
+                        sep2_conn_input
+                            .send(sep2_connection::Command::SendDeviceSettings(der_settings))
+                            .await
+                            .map_err(|_| Error::ChannelClosed)?;
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "Failed to translate modbus device settings to SEP2 DERSettings: {err}"
+                        );
+                    }
+                };
+            }
+        }
     }
 
-    let contents = fs::read_to_string(&file_path).map_err(|err| {
-        Error::InvalidInput(format!(
-            "Error reading from '{}': {}",
-            file_path.to_string_lossy(),
-            err
-        ))
-    })?;
-
-    let number = contents
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| Error::InvalidInput(String::from("Could not parse PIN")))?;
-
-    Some(PINType::new(number).ok_or(Error::InvalidInput(String::from(
-        "PIN is a number but not of the right size",
-    ))))
-    .transpose()
+    Err(Error::ChannelClosed)
 }
