@@ -224,13 +224,11 @@ pub async fn task(
             }
             Command::SendDeviceCapability(capabilities) => {
                 log::trace!("Received device capabilities");
-                if device_capabilities.is_some() {
-                    log::warn!(
-                        "Received device capabilities when we already have them. Sending again."
-                    );
+                if Some(&capabilities) != device_capabilities.as_ref() {
+                    device_capabilities = Some(capabilities);
+                    // TODO: We also need to send the DERCapability regularly even if it hasn't changed.
+                    device_capabilities_sent = false;
                 }
-                device_capabilities = Some(capabilities);
-                device_capabilities_sent = false;
             }
             Command::SendDeviceStatus(status) => {
                 log::trace!("Received device status");
