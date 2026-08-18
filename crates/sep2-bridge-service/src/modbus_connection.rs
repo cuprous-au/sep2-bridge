@@ -1,6 +1,6 @@
 use async_broadcast::Sender as BroadcastSender;
 use derive_more::Display;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use sunspec::{
     client::{AsyncClient, AsyncDevice, Config},
     models::{
@@ -62,7 +62,7 @@ const MIN_POLL_PERIOD: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub enum Transport {
-    //Tcp
+    Tcp(SocketAddr),
     //Rtu
     Unix(PathBuf),
 }
@@ -182,9 +182,12 @@ async fn establish_connection(
                 Error::ConnectionFailed
             })?;
             client::tcp::attach(stream)
-        } // TODO: TCP
-          // TODO: RTU over serial
-          // TODO: RTU over TCP
+        }
+        Transport::Tcp(addr) => client::tcp::connect(*addr).await.map_err(|err| {
+            log::warn!("Unable to connect to modbus socket at {}: {}", addr, err);
+            Error::ConnectionFailed
+        })?, // TODO: RTU over serial
+             // TODO: RTU over TCP
     };
 
     let config = Config::default();
