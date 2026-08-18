@@ -5,6 +5,8 @@ use chrono::Utc;
 use sep2_bridge::{Result, sep2_connection};
 use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::packages::{
+    der::{ActivePower, DERCapability},
+    metering_mirror::MirrorMeterReading,
     primitives::{HexBinary160, Int16},
     types::{DeviceCategoryType, PowerOfTenMultiplierType, SFDIType},
 };
@@ -129,14 +131,13 @@ async fn sends_capabilities() {
         .await;
 
     // Send the capabilities
-    let capabilities =
-        sep2_connection::Command::SendDeviceCapability(sep2_common::packages::der::DERCapability {
-            rtg_max_w: sep2_common::packages::der::ActivePower {
-                multiplier: PowerOfTenMultiplierType::None,
-                value: Int16(42),
-            },
-            ..Default::default()
-        });
+    let capabilities = sep2_connection::Command::SendDeviceCapability(DERCapability {
+        rtg_max_w: ActivePower {
+            multiplier: PowerOfTenMultiplierType::None,
+            value: Int16(42),
+        },
+        ..Default::default()
+    });
     input_ch.send(capabilities).await.expect("Send error");
 
     // Clear out any events
@@ -150,11 +151,38 @@ async fn sends_capabilities() {
             .await
             .unwrap()
             .into_iter()
-            .any(|req| {
-                req.url.path() == "/edev/1/der/1/dercap"
-                    && expected.is_match(&String::from_utf8(req.body).unwrap())
-            })
+            .any(|req| req.url.path() == "/edev/1/der/1/dercap"
+                && expected.is_match(&String::from_utf8(req.body).unwrap()))
     );
+}
+
+/// Tests whether the task registers a MUP and pushes metering readings.
+#[tokio::test]
+async fn sends_metering_readings() {
+    // Setup
+    let (_task, mock, input_ch, mut output_ch) = setup().await;
+
+    // Setup mock for the push to the registered MUP (registration happens in
+    // the base mocks)
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/mup/2"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .named("MUP reading post")
+        .mount(&mock)
+        .await;
+
+    // Send some metering readings
+    let metering = sep2_connection::Command::SendMeterReadings(vec![MirrorMeterReading {
+        ..Default::default()
+    }]);
+    input_ch.send(metering).await.expect("Send error");
+
+    // Clear out any events
+    time::sleep(FLUSH_TIME).await;
+    clear_channel(&mut output_ch).await;
+
+    // We test the receipt of a request from the wiremock expect clause.
 }
 
 /////
@@ -321,6 +349,23 @@ async fn setup_base_mocks(mock: &MockServer, lfdi: HexBinary160, sfdi: SFDIType)
     <DERStatusLink href="/edev/1/der/1/ders"/>
   </DER>
 </DERList>"#))
+        .await;
+
+    // Setup mock at the mup listing endpoint with no registered MUP.
+    mock_get(mock, String::from("/mup"), String::from(r#"
+<MirrorUsagePointList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/mup" all="0" results="0" pollRate="60">
+</MirrorUsagePointList>
+"#)).await;
+
+    // And setup mock to return a new registered MUP when an attempt is made. We
+    // don't mock the mup itself becasue that is only needed when sending
+    // metering readings.
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/mup"))
+        .respond_with(ResponseTemplate::new(201).append_header("Location", "/mup/2"))
+        .expect(1)
+        .named("MUP register")
+        .mount(mock)
         .await;
 }
 
