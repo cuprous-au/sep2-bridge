@@ -31,7 +31,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug)]
 pub enum Event {
     CapabilitiesPolled(Capabilities),
-    StatePolled(Status, Settings),
+    StatePolled(Status, Settings, Metering),
 }
 
 #[derive(Clone, Debug)]
@@ -148,9 +148,9 @@ pub async fn task(
                 Ok(Err(err)) => {
                     drop_connection(device_opt.take(), err).await;
                 }
-                Ok(Ok((status, settings))) => {
+                Ok(Ok((status, settings, metering))) => {
                     output_ch
-                        .broadcast(Event::StatePolled(status, settings))
+                        .broadcast(Event::StatePolled(status, settings, metering))
                         .await
                         .map_err(|_| crate::Error::ChannelClosed)?;
                 }
@@ -308,7 +308,7 @@ pub struct Status {
 }
 
 impl Status {
-    fn from(m701: Model701, m713: Model713) -> Self {
+    fn from(m701: &Model701, m713: &Model713) -> Self {
         Status {
             st: m701.st,
             conn_st: m701.conn_st,
@@ -325,19 +325,81 @@ pub struct Settings {
 }
 
 impl Settings {
-    fn from(m703: Model703) -> Self {
+    fn from(m703: &Model703) -> Self {
         Settings {
             esv_hi: m703.esv_hi,
         }
     }
 }
 
-async fn poll_device_state(device: &AsyncDevice<TokioModbusContext>) -> Result<(Status, Settings)> {
+#[derive(Clone, Debug)]
+pub struct Metering {
+    pub active_power: Option<i16>,
+    pub reactive_power: Option<i16>,
+    pub voltages: Vec<VoltageWithReference>,
+    pub frequency: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoltageWithReference(pub u16, pub PhaseReference);
+
+#[derive(Copy, Clone, Debug, Display)]
+pub enum PhaseReference {
+    LLV,
+    LNV,
+    VL1L2,
+    VL1,
+    VL2L3,
+    VL2,
+    VL3L1,
+    VL3,
+}
+
+impl Metering {
+    fn from(m701: &Model701) -> Self {
+        // Collecting up all voltages into a vector rather than hardcoding them.
+        let voltages = [
+            m701.llv
+                .map(|v| VoltageWithReference(v, PhaseReference::LLV)),
+            m701.lnv
+                .map(|v| VoltageWithReference(v, PhaseReference::LNV)),
+            m701.vl1l2
+                .map(|v| VoltageWithReference(v, PhaseReference::VL1L2)),
+            m701.vl1
+                .map(|v| VoltageWithReference(v, PhaseReference::VL1)),
+            m701.vl1l2
+                .map(|v| VoltageWithReference(v, PhaseReference::VL2L3)),
+            m701.vl1
+                .map(|v| VoltageWithReference(v, PhaseReference::VL2)),
+            m701.vl1l2
+                .map(|v| VoltageWithReference(v, PhaseReference::VL3L1)),
+            m701.vl1
+                .map(|v| VoltageWithReference(v, PhaseReference::VL3)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Metering {
+            active_power: m701.w,
+            reactive_power: m701.var,
+            voltages,
+            frequency: m701.hz,
+        }
+    }
+}
+
+async fn poll_device_state(
+    device: &AsyncDevice<TokioModbusContext>,
+) -> Result<(Status, Settings, Metering)> {
     let m701: Model701 = device.read_model().await.map_err(comm_err)?;
     let m703: Model703 = device.read_model().await.map_err(comm_err)?;
     let m713: Model713 = device.read_model().await.map_err(comm_err)?;
 
-    Ok((Status::from(m701, m713), Settings::from(m703)))
+    Ok((
+        Status::from(&m701, &m713),
+        Settings::from(&m703),
+        Metering::from(&m701),
+    ))
 }
 
 /////

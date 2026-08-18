@@ -2,22 +2,31 @@
 
 use chrono::Utc;
 use derive_more::Display;
-use sep2_common::packages::{
-    der::{
-        ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
-        DERCapability, DERControlType, DERSettings, DERStatus, OperationalModeStatusType,
-        OperationalModeStatusValue, PowerFactor, ReactivePower, ReactiveSusceptance,
-        StateOfChargeStatusType, VoltageRMS,
+use sep2_common::{
+    mrid_gen,
+    packages::{
+        der::{
+            ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
+            DERCapability, DERControlType, DERSettings, DERStatus, OperationalModeStatusType,
+            OperationalModeStatusValue, PowerFactor, ReactivePower, ReactiveSusceptance,
+            StateOfChargeStatusType, VoltageRMS,
+        },
+        metering::{Reading, ReadingType},
+        metering_mirror::MirrorMeterReading,
+        primitives::{Int16, Int48, Int64, String32, Uint16, Uint32},
+        types::{
+            AccumulationBehaviourType, CommodityType, DateTimeInterval, FlowDirectionType,
+            KindType, Percent, PhaseCode, PowerOfTenMultiplierType, UomType,
+        },
     },
-    primitives::{Int16, Int64, Uint16},
-    types::{Percent, PowerOfTenMultiplierType},
 };
 use sunspec::models::{model701, model702::CtrlModes, model703};
 
 use crate::{
     modbus_connection::{
-        Capabilities as ModbusCapabilities, Parameters as ModbusParameters,
-        Settings as ModbusSettings, Status as ModbusStatus,
+        Capabilities as ModbusCapabilities, Metering as ModbusMetering,
+        Parameters as ModbusParameters, PhaseReference, Settings as ModbusSettings,
+        Status as ModbusStatus, VoltageWithReference,
     },
     scheduler::ControlAttributes,
 };
@@ -136,6 +145,100 @@ impl TryConvert<DERSettings> for ModbusSettings {
                 .map_err(|err| err.name("set_es_high_volt"))?,
             ..Default::default()
         })
+    }
+}
+
+impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
+    fn try_convert(self: ModbusMetering) -> Result<Vec<MirrorMeterReading>> {
+        let now = Int64(Utc::now().timestamp());
+
+        let template_reading_type = ReadingType {
+            accumulation_behaviour: Some(AccumulationBehaviourType::Instantaneous),
+            commodity: Some(CommodityType::ElectricitySecondaryMetered),
+            ..Default::default()
+        };
+        let template_reading = Reading {
+            time_period: Some(DateTimeInterval {
+                start: now,
+                duration: Uint32(0),
+            }),
+            ..Default::default()
+        };
+        let template = MirrorMeterReading {
+            // FIXME: What to do with MRIDs??
+            mrid: mrid_gen(0),
+            ..Default::default()
+        };
+
+        let active_power = self.active_power.map(|value| MirrorMeterReading {
+            description: Some(String32("active_power".into())),
+            reading_type: Some(ReadingType {
+                flow_direction: Some(FlowDirectionType::Reverse),
+                kind: Some(KindType::Power),
+                uom: Some(UomType::W),
+                ..template_reading_type.clone()
+            }),
+            reading: Some(Reading {
+                value: Some(Int48(i64::from(value))),
+                ..template_reading.clone()
+            }),
+            ..template.clone()
+        });
+        let reactive_power = self.reactive_power.map(|value| MirrorMeterReading {
+            description: Some(String32("reactive_power".into())),
+            reading_type: Some(ReadingType {
+                flow_direction: Some(FlowDirectionType::Reverse),
+                kind: Some(KindType::Power),
+                uom: Some(UomType::VAr),
+                ..template_reading_type.clone()
+            }),
+            reading: Some(Reading {
+                value: Some(Int48(i64::from(value))),
+                ..template_reading.clone()
+            }),
+            ..template.clone()
+        });
+        let voltages = self
+            .voltages
+            .iter()
+            .map(|VoltageWithReference(v, phase)| {
+                let name = format!("voltage_{}", phase);
+                Ok(MirrorMeterReading {
+                    description: Some(String32(name.clone())),
+                    reading_type: Some(ReadingType {
+                        flow_direction: Some(FlowDirectionType::Forward),
+                        phase: Some(phase.try_convert().map_err(|err| err.name("voltages"))?),
+                        uom: Some(UomType::Voltage),
+                        ..template_reading_type.clone()
+                    }),
+                    reading: Some(Reading {
+                        value: Some(Int48(i64::from(*v))),
+                        ..template_reading.clone()
+                    }),
+                    ..template.clone()
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let frequency = self.frequency.map(|value| MirrorMeterReading {
+            description: Some(String32("frequency".into())),
+            reading_type: Some(ReadingType {
+                flow_direction: Some(FlowDirectionType::Reverse),
+                uom: Some(UomType::Hz),
+                ..template_reading_type.clone()
+            }),
+            reading: Some(Reading {
+                value: Some(Int48(i64::from(value))),
+                ..template_reading.clone()
+            }),
+            ..template.clone()
+        });
+
+        Ok(vec![active_power, reactive_power, frequency]
+            .into_iter()
+            .flatten()
+            .chain(voltages)
+            .collect())
     }
 }
 
@@ -364,6 +467,23 @@ impl Convert<StateOfChargeStatusType> for u16 {
     }
 }
 
+impl TryConvertUnnamed<PhaseCode> for PhaseReference {
+    fn try_convert(self: PhaseReference) -> ResultUnnamed<PhaseCode> {
+        Ok(match self {
+            // Is this PhaseCode::PhaseABC?
+            PhaseReference::LLV => Err(Error::Unknown)?,
+            // Is this PhaseCode::PhaseAN?
+            PhaseReference::LNV => Err(Error::Unknown)?,
+            PhaseReference::VL1 => PhaseCode::PhaseA,
+            PhaseReference::VL2 => PhaseCode::PhaseB,
+            PhaseReference::VL3 => PhaseCode::PhaseC,
+            PhaseReference::VL1L2 => PhaseCode::PhaseAB,
+            PhaseReference::VL2L3 => PhaseCode::PhaseBC,
+            PhaseReference::VL3L1 => PhaseCode::PhaseCA,
+        })
+    }
+}
+
 //////
 // Internals for converting to modbus.
 impl TryConvertUnnamed<u16> for Int16 {
@@ -467,6 +587,7 @@ mod tests {
         let result: Result<DERSettings> = settings.try_convert();
         assert!(result.is_ok());
     }
+
     #[test]
     fn status() {
         let status = ModbusStatus {
@@ -480,6 +601,7 @@ mod tests {
         let result: Result<DERStatus> = status.try_convert();
         assert!(result.is_ok());
     }
+
     #[test]
     fn capabilities() {
         let capabilities = ModbusCapabilities {
@@ -504,6 +626,20 @@ mod tests {
         let result: Result<DERCapability> = capabilities.try_convert();
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn metering() {
+        let metering = ModbusMetering {
+            active_power: Some(42),
+            reactive_power: Some(45),
+            voltages: vec![VoltageWithReference(10000, PhaseReference::VL1L2)],
+            frequency: Some(60),
+        };
+
+        let result: Result<Vec<MirrorMeterReading>> = metering.try_convert();
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn parameters() {
         let parameters = ControlAttributes {

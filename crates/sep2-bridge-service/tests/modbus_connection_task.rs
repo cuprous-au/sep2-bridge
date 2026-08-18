@@ -5,7 +5,7 @@ use std::time::Duration;
 use modbus_server_mock::SunSpecMock;
 use sep2_bridge::{
     Result,
-    modbus_connection::{self, Capabilities, Settings, Status, Transport},
+    modbus_connection::{self, Capabilities, Metering, Settings, Status, Transport},
 };
 use sunspec::models::{model701, model703};
 use tokio::{
@@ -56,6 +56,7 @@ async fn reads_device_state() {
     let expected_w_max_rtg = mock.get_value::<Option<u16>>("model702::W_MAX_RTG");
     let expected_esv_hi = mock.get_value::<Option<u16>>("model703::ESV_HI");
     let expected_st = mock.get_value::<Option<model701::St>>("model701::ST");
+    let expected_w = mock.get_value::<Option<i16>>("model701::W");
     // Expect received capabilities struct.
     assert!(all_events.iter().any(
         |ev| matches!(ev, modbus_connection::Event::CapabilitiesPolled(
@@ -75,8 +76,11 @@ async fn reads_device_state() {
                 },
                 Settings {
                     esv_hi
-                }
-            ) if esv_hi == &expected_esv_hi && st == &expected_st
+                },
+                Metering {
+                    active_power, ..
+                },
+            ) if esv_hi == &expected_esv_hi && st == &expected_st && active_power == &expected_w
             ))
     );
 }
