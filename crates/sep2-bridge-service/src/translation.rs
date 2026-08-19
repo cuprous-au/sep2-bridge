@@ -2,22 +2,19 @@
 
 use chrono::Utc;
 use derive_more::Display;
-use sep2_common::{
-    mrid_gen,
-    packages::{
-        der::{
-            ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
-            DERCapability, DERControlType, DERSettings, DERStatus, OperationalModeStatusType,
-            OperationalModeStatusValue, PowerFactor, ReactivePower, ReactiveSusceptance,
-            StateOfChargeStatusType, VoltageRMS,
-        },
-        metering::{Reading, ReadingType},
-        metering_mirror::MirrorMeterReading,
-        primitives::{Int16, Int48, Int64, String32, Uint16, Uint32},
-        types::{
-            AccumulationBehaviourType, CommodityType, DateTimeInterval, FlowDirectionType,
-            KindType, Percent, PhaseCode, PowerOfTenMultiplierType, UomType,
-        },
+use sep2_common::packages::{
+    der::{
+        ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
+        DERCapability, DERControlType, DERSettings, DERStatus, OperationalModeStatusType,
+        OperationalModeStatusValue, PowerFactor, ReactivePower, ReactiveSusceptance,
+        StateOfChargeStatusType, VoltageRMS,
+    },
+    metering::{Reading, ReadingType},
+    metering_mirror::MirrorMeterReading,
+    primitives::{Int16, Int48, Int64, String32, Uint16, Uint32},
+    types::{
+        AccumulationBehaviourType, CommodityType, DateTimeInterval, FlowDirectionType, KindType,
+        MRIDType, Percent, PhaseCode, PowerOfTenMultiplierType, UomType,
     },
 };
 use sunspec::models::{model701, model702::CtrlModes, model703};
@@ -165,8 +162,9 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
             ..Default::default()
         };
         let template = MirrorMeterReading {
-            // FIXME: What to do with MRIDs??
-            mrid: mrid_gen(0),
+            // We leave the MRID to be assigned by the sep2_connection task.
+            // However, it is mandatory in the struct so we assign a default.
+            mrid: MRIDType(0),
             ..Default::default()
         };
 
@@ -470,10 +468,8 @@ impl Convert<StateOfChargeStatusType> for u16 {
 impl TryConvertUnnamed<PhaseCode> for PhaseReference {
     fn try_convert(self: PhaseReference) -> ResultUnnamed<PhaseCode> {
         Ok(match self {
-            // Is this PhaseCode::PhaseABC?
-            PhaseReference::LLV => Err(Error::Unknown)?,
-            // Is this PhaseCode::PhaseAN?
-            PhaseReference::LNV => Err(Error::Unknown)?,
+            PhaseReference::LLV => PhaseCode::PhaseABC,
+            PhaseReference::LNV => PhaseCode::PhaseAN,
             PhaseReference::VL1 => PhaseCode::PhaseA,
             PhaseReference::VL2 => PhaseCode::PhaseB,
             PhaseReference::VL3 => PhaseCode::PhaseC,

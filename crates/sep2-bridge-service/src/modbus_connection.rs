@@ -367,13 +367,13 @@ impl Metering {
                 .map(|v| VoltageWithReference(v, PhaseReference::VL1L2)),
             m701.vl1
                 .map(|v| VoltageWithReference(v, PhaseReference::VL1)),
-            m701.vl1l2
+            m701.vl2l3
                 .map(|v| VoltageWithReference(v, PhaseReference::VL2L3)),
-            m701.vl1
+            m701.vl2
                 .map(|v| VoltageWithReference(v, PhaseReference::VL2)),
-            m701.vl1l2
+            m701.vl3l1
                 .map(|v| VoltageWithReference(v, PhaseReference::VL3L1)),
-            m701.vl1
+            m701.vl3
                 .map(|v| VoltageWithReference(v, PhaseReference::VL3)),
         ]
         .into_iter()

@@ -63,6 +63,10 @@ pub struct Args {
     /// required, one of unix://, tcp://, ...
     #[clap(env, long, value_parser = parse_modbus_socket)]
     modbus_socket: ModbusTransport,
+
+    /// The PEN (Private Enterprise Number) used to make mRIDs unique.
+    #[clap(env, long, default_value_t = 0)]
+    pen: u32,
 }
 
 fn validate_path_exists(input: &str) -> std::result::Result<PathBuf, String> {
@@ -229,13 +233,14 @@ async fn main() -> Result<()> {
                 sep2_conn_output_tx,
                 sep2_conn_input_rx,
                 sep2_conn_input_tx,
-                client,
                 sep2_connection::Sep2ConnectionArgs {
+                    client,
                     dcap_uri: args.dcap_uri,
                     max_list_size: args.max_list_size,
                     default_poll_rate: args.default_poll_rate,
                     device_to_register,
                     expected_pin,
+                    pen: args.pen,
                 },
             )
             .await

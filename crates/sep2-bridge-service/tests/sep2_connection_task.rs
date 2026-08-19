@@ -6,9 +6,10 @@ use sep2_bridge::{Result, sep2_connection};
 use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::packages::{
     der::{ActivePower, DERCapability},
+    metering::ReadingType,
     metering_mirror::MirrorMeterReading,
     primitives::{HexBinary160, Int16},
-    types::{DeviceCategoryType, PowerOfTenMultiplierType, SFDIType},
+    types::{DeviceCategoryType, PowerOfTenMultiplierType, SFDIType, UomType},
 };
 use tokio::{
     sync::mpsc,
@@ -162,18 +163,82 @@ async fn sends_metering_readings() {
     // Setup
     let (_task, mock, input_ch, mut output_ch) = setup().await;
 
-    // Setup mock for the push to the registered MUP (registration happens in
-    // the base mocks)
-    Mock::given(matchers::method("POST"))
-        .and(matchers::path("/mup/2"))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .named("MUP reading post")
-        .mount(&mock)
-        .await;
+    setup_mup_mocks(&mock).await;
 
-    // Send some metering readings
+    // Send some metering readings - we need enough information that the
+    // sep2_connection task can build a mrid cache key out of it
+    let metering = sep2_connection::Command::SendMeterReadings(vec![
+        MirrorMeterReading {
+            reading_type: Some(ReadingType {
+                uom: Some(UomType::W),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        // Only one reading will only cause a registration (as registration
+        // requires at least one reading to be present). To test posting to the
+        // endpoint itself, pass a second reading.
+        MirrorMeterReading {
+            reading_type: Some(ReadingType {
+                uom: Some(UomType::Hz),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ]);
+    input_ch.send(metering).await.expect("Send error");
+
+    // Clear out any events
+    time::sleep(FLUSH_TIME).await;
+    clear_channel(&mut output_ch).await;
+
+    // We expect the MUP endpoints to have been hit.
+    let requests = mock.received_requests().await.unwrap();
+    assert!(requests.iter().any(|r| r.url.path() == "/mup"));
+    assert!(requests.iter().any(|r| r.url.path() == "/mup/2"));
+}
+
+/// Tests whether the meter readings will reuse an existing MRID
+#[tokio::test]
+async fn reuses_existing_meter_mrid() {
+    // Setup
+    let (_task, mock, input_ch, mut output_ch) = setup().await;
+
+    let mrid = "AAE241C10056E16C7A87BBBF00000000";
+
+    // Setup mock at the mup listing endpoint with previous meter readings.
+    mock_get(&mock, String::from("/mup"), format!(r#"
+<MirrorUsagePointList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/mup" all="0" results="0" pollRate="{MOCK_POLL_RATE}">
+  <MirrorUsagePoint href="/mup/2">
+    <mRID>EEF6A7789439E7456F9D2CDF00000000</mRID>
+    <roleFlags>00</roleFlags>
+    <serviceCategoryKind>0</serviceCategoryKind>
+    <status>1</status>
+    <deviceLFDI>{lfdi}</deviceLFDI>
+    <MirrorMeterReading>
+      <mRID>{mrid}</mRID>
+      <description>active_power</description>
+      <ReadingType>
+        <accumulationBehaviour>12</accumulationBehaviour>
+        <commodity>1</commodity>
+        <dataQualifier>0</dataQualifier>
+        <flowDirection>19</flowDirection>
+        <intervalLength>0</intervalLength>
+        <kind>0</kind>
+        <powerOfTenMultiplier>0</powerOfTenMultiplier>
+        <uom>38</uom>
+      </ReadingType>
+    </MirrorMeterReading>
+  </MirrorUsagePoint>
+</MirrorUsagePointList>
+"#, lfdi=mock_lfdi())).await;
+
+    // Send a meter reading with the same UoM as the mock.
     let metering = sep2_connection::Command::SendMeterReadings(vec![MirrorMeterReading {
+        reading_type: Some(ReadingType {
+            uom: Some(UomType::W),
+            ..Default::default()
+        }),
         ..Default::default()
     }]);
     input_ch.send(metering).await.expect("Send error");
@@ -182,7 +247,15 @@ async fn sends_metering_readings() {
     time::sleep(FLUSH_TIME).await;
     clear_channel(&mut output_ch).await;
 
-    // We test the receipt of a request from the wiremock expect clause.
+    // Ensure the request sent to the SEP2 server contains the same MRID.
+    assert!(
+        mock.received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .inspect(|req| eprintln!("{:?}", req))
+            .any(|req| String::from_utf8(req.body).unwrap().contains(mrid))
+    );
 }
 
 /////
@@ -229,6 +302,10 @@ where
     }
 }
 
+fn mock_lfdi() -> HexBinary160 {
+    HexBinary160::from_str("00112233").expect("Invalid LFDI")
+}
+
 async fn setup() -> (
     JoinHandle<Result<()>>,
     MockServer,
@@ -236,7 +313,7 @@ async fn setup() -> (
     async_broadcast::Receiver<sep2_connection::Sep2ResourceEvent>,
 ) {
     // Our fake device
-    let lfdi = HexBinary160::from_str("00112233").expect("Invalid LFDI");
+    let lfdi = mock_lfdi();
     let sfdi = SFDIType::new(42).expect("Invalid SFDI");
     let device = SEDevice::new(lfdi, sfdi, DeviceCategoryType::empty());
 
@@ -268,13 +345,14 @@ async fn setup() -> (
                 output_tx,
                 input_rx,
                 input_tx,
-                client,
                 sep2_connection::Sep2ConnectionArgs {
+                    client,
                     dcap_uri: String::from("/dcap"),
                     max_list_size: 30,
                     default_poll_rate: 1,
                     device_to_register: device,
                     expected_pin: None,
+                    pen: 42,
                 },
             )
             .await
@@ -350,23 +428,6 @@ async fn setup_base_mocks(mock: &MockServer, lfdi: HexBinary160, sfdi: SFDIType)
   </DER>
 </DERList>"#))
         .await;
-
-    // Setup mock at the mup listing endpoint with no registered MUP.
-    mock_get(mock, String::from("/mup"), String::from(r#"
-<MirrorUsagePointList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/mup" all="0" results="0" pollRate="60">
-</MirrorUsagePointList>
-"#)).await;
-
-    // And setup mock to return a new registered MUP when an attempt is made. We
-    // don't mock the mup itself becasue that is only needed when sending
-    // metering readings.
-    Mock::given(matchers::method("POST"))
-        .and(matchers::path("/mup"))
-        .respond_with(ResponseTemplate::new(201).append_header("Location", "/mup/2"))
-        .expect(1)
-        .named("MUP register")
-        .mount(mock)
-        .await;
 }
 
 async fn setup_fsal_mock(mock: &MockServer) {
@@ -380,4 +441,30 @@ async fn setup_fsal_mock(mock: &MockServer) {
   </FunctionSetAssignments>
 </FunctionSetAssignmentsList>"#),
     ).await;
+}
+
+async fn setup_mup_mocks(mock: &MockServer) {
+    // Setup mock at the mup listing endpoint with no registered MUP.
+    mock_get(mock, String::from("/mup"), String::from(r#"
+<MirrorUsagePointList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/mup" all="0" results="0" pollRate="60">
+</MirrorUsagePointList>
+"#)).await;
+
+    // And setup mock to return a new registered MUP when an attempt is made.
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/mup"))
+        .respond_with(ResponseTemplate::new(201).append_header("Location", "/mup/2"))
+        .expect(1)
+        .named("MUP register")
+        .mount(mock)
+        .await;
+
+    // Setup mock for the push to the registered MUP
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/mup/2"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1..)
+        .named("MUP reading post")
+        .mount(mock)
+        .await;
 }
