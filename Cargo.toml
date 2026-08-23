@@ -17,6 +17,7 @@ exponential-backoff = "2.1.0"
 git-version = "0.3.9"
 log = "0.4.29"
 rand = "0.10.2"
+regex = "1.13.1"
 reqwest = "0.12"
 sep2_client = { git = "https://github.com/ethanndickson/sep2_client.git", rev = "cc86179b013517d0681130d1f7adc605aca2b95d" }
 sep2_common = "0.1.0"
@@ -28,6 +29,7 @@ tokio-modbus = "0.17.0"
 tokio-util = "0.7.18"
 tower-http = "0.6"
 url = "2.5.8"
+wiremock = "0.6.5"
 proptest = "1.6.0"
 
 [patch.crates-io]

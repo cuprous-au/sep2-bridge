@@ -79,6 +79,7 @@ impl From<Time> for Sep2ResourceEvent {
     }
 }
 
+#[derive(Clone, Debug)]
 pub enum Command {
     SendDeviceStatus(DERStatus),
     SendDeviceCapability(DERCapability),
