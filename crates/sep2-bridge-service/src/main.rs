@@ -2,7 +2,12 @@ use clap::Parser;
 use git_version::git_version;
 use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::packages::types::{DeviceCategoryType, PINType};
-use std::{fs, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 use tokio::{sync::mpsc, task::JoinSet};
 use url::Url;
 
@@ -93,6 +98,30 @@ fn parse_modbus_socket(value: &str) -> std::result::Result<ModbusTransport, Stri
                     Err(String::from("Unexpected parts of URL present."))
                 } else {
                     Ok(ModbusTransport::Unix(PathBuf::from(url.path())))
+                }
+            }
+            "tcp" => {
+                if url.username() != ""
+                    || url.password().is_some()
+                    || !(url.path().is_empty() || url.path() == "/")
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    Err(String::from("Unexpected parts of URL present."))
+                } else {
+                    // Note: the url parsing for the tcp scheme leaves an IP as
+                    // a domain in contrast to the http scheme.
+                    let ip = match url.domain() {
+                        None => Err(String::from("Missing host"))?,
+                        Some(host) => host
+                            .parse::<IpAddr>()
+                            .map_err(|_| String::from("Host is not an IP address"))?,
+                    };
+
+                    Ok(ModbusTransport::Tcp(SocketAddr::new(
+                        ip,
+                        url.port().unwrap_or(502),
+                    )))
                 }
             }
             scheme => Err(format!("Unknown modbus socket scheme '{scheme}'")),
