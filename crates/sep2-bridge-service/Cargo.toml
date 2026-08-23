@@ -21,4 +21,6 @@ tokio-modbus.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-proptest = { workspace = true }
+proptest.workspace = true
+wiremock.workspace = true
+regex.workspace = true

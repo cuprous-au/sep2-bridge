@@ -5,7 +5,7 @@ use sep2_common::packages::{
     primitives::{HexBinary160, Int64},
     types::MRIDType,
 };
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle, time};
 
 use crate::{Error, ResourceKind, Result, sep2_connection::Sep2ResourceEvent};
@@ -133,7 +133,9 @@ pub async fn task(
         // Kill off any previous wait task.
         if let Some(handle) = wait_task.take() {
             handle.abort();
-            if let Err(e) = handle.await {
+            if let Err(e) = handle.await
+                && !e.is_cancelled()
+            {
                 log::warn!("Joining aborted scheduler task returned an error: {e}");
             }
         }
@@ -315,12 +317,10 @@ async fn scheduler_action_task(
     };
 
     // TODO: For long waits, possibly better to wait in small increments to avoid clock drift.
-    let dt = next_event_time
-        .signed_duration_since(Utc::now())
-        .num_seconds();
-    if dt > 0 {
-        log::trace!("Sleeping for {dt}s");
-        time::sleep(Duration::from_secs(dt as u64)).await;
+    let dt = next_event_time.signed_duration_since(Utc::now());
+    if let Ok(dt) = dt.to_std() {
+        log::trace!("Sleeping for {dt:?}");
+        time::sleep(dt).await;
     }
 
     // Send out the events we predicted.
