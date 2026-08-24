@@ -504,15 +504,6 @@ async fn send_new_parameters(
     device: &AsyncDevice<TokioModbusContext>,
     parameters: &Parameters,
 ) -> Result<()> {
-    // TODO: Understand the SEP2 and sunspec meaning of None. Is it:
-    // a) value is not provided and should not be communicated, or
-    // b) value is null and should be set to null on the other side.
-    // Currently this function is going with the interpretation of a) in both directions.
-    //
-    // Note: if b) ends up being the interpretation, then it might be better to
-    // implement a write_model for optimal communication rather than sending
-    // each point individually.
-
     // This is an ugly utility function to make the rest of the parameters less ugly.
     // The main point is that we only send the value if it is Some.
     async fn write_if_some<T: FixedSize, M: Model>(
@@ -535,7 +526,8 @@ async fn send_new_parameters(
         // control before continuing.
         let n_ctl = device.read_point(Model711::N_CTL).await.map_err(comm_err)?;
         if n_ctl >= 2 {
-            let offset = Model711::LEN + model711::Ctl::LEN;
+            // We write into the second Ctl group.
+            let offset = Model711::addr(&device.models).addr + Model711::LEN + model711::Ctl::LEN;
             // And assign manually
 
             // FIXME: It would be nice to write all of these registers in one
@@ -561,8 +553,8 @@ async fn send_new_parameters(
         write_if_some(device, Model703::ES_RMP_TMS, parameters.es_rmp_tms).await?;
     }
 
-    // AS5438 - Table 11
     if device.models.supported_model_ids().contains(&704) {
+        // AS5438 - Table 11
         write_if_some(
             device,
             Model704::W_MAX_LIM_PCT_ENA,
@@ -580,7 +572,8 @@ async fn send_new_parameters(
 }
 
 /// A convenience tool for writing points that are part of repeating groups.
-/// Requires the offset for the start of the group and a point within the group.
+/// Requires the absolute register address for the start of the group and a
+/// point within the group.
 async fn write_offset_point<G: Group, T: Value>(
     device: &AsyncDevice<TokioModbusContext>,
     offset: u16,

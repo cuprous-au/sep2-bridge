@@ -164,11 +164,11 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
             ..Default::default()
         };
 
-        let power_template = |value: Option<i16>, phase| {
+        let power_template = |name: &str, value: Option<i16>, phase| {
             value
                 .map(|value| {
                     Ok(MirrorMeterReading {
-                        description: Some(String32("w".into())),
+                        description: Some(String32(name.into())),
                         reading_type: Some(ReadingType {
                             flow_direction: Some(FlowDirectionType::Reverse),
                             kind: Some(KindType::Power),
@@ -190,10 +190,10 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                 .transpose()
         };
 
-        let w = power_template(self.w, None)?;
-        let wl1 = power_template(self.wl1, Some(PhaseCode::PhaseA))?;
-        let wl2 = power_template(self.wl2, Some(PhaseCode::PhaseB))?;
-        let wl3 = power_template(self.wl3, Some(PhaseCode::PhaseC))?;
+        let w = power_template("w", self.w, None)?;
+        let wl1 = power_template("wl1", self.wl1, Some(PhaseCode::PhaseA))?;
+        let wl2 = power_template("wl2", self.wl2, Some(PhaseCode::PhaseB))?;
+        let wl3 = power_template("wl3", self.wl3, Some(PhaseCode::PhaseC))?;
 
         let var = self
             .var
@@ -229,9 +229,9 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                         flow_direction: Some(FlowDirectionType::Forward),
                         phase: Some(phase.try_convert().map_err(|err| err.name("voltages"))?),
                         power_of_ten_multiplier: self
-                            .var_sf
+                            .v_sf
                             .try_convert()
-                            .map_err(|err| err.name("var_sf"))?,
+                            .map_err(|err| err.name("v_sf"))?,
                         uom: Some(UomType::Voltage),
                         ..template_reading_type.clone()
                     }),

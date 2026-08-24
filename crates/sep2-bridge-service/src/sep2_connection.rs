@@ -919,7 +919,8 @@ fn reading_key(reading: &MirrorMeterReading) -> Option<CacheKey> {
             CacheKey(
                 *uom,
                 reading_type.phase,
-                // Default the power of ten to Some(None) rather than None.
+                // Default the power of ten to POTM::None so that there's no
+                // confusion between a None and a Some(None).
                 reading_type.power_of_ten_multiplier.unwrap_or_default(),
             )
         })
