@@ -32,10 +32,12 @@ pub struct SunSpecMock {
 
 impl SunSpecMock {
     /// Prepares the registers to start a server.
-    pub async fn new() -> Result<SunSpecMock, Box<dyn std::error::Error>> {
+    pub async fn new(
+        enabled_models: Option<&[u32]>,
+    ) -> Result<SunSpecMock, Box<dyn std::error::Error>> {
         // Initialise the internal state
         let mut registers = vec![0u16; 40500];
-        let locations = initialise_registers(&mut registers);
+        let locations = initialise_registers(&mut registers, enabled_models);
 
         // Mutex these states for the service.
         let service_data = SunSpecService {
@@ -231,19 +233,31 @@ fn location<T: Model, U: Value>(point: Point<T, U>, base: usize) -> (usize, usiz
 
 /// Fill the registers with some dummy data. Some select locations are saved for
 /// later random-access reading/writing.
-fn initialise_registers(registers: &mut [u16]) -> Locations {
+fn initialise_registers(registers: &mut [u16], enabled_models: Option<&[u32]>) -> Locations {
     let mut locations = HashMap::new();
     // Place 'SunS' magic bytes at base offsets 0 and 40000 for standard discovery
     for base in [0, 40000] {
         registers[base..base + 2].copy_from_slice(&String::from("SunS").encode());
 
-        let offset = base + 2;
-        let offset = add_model_1(registers, offset, &mut locations);
-        let offset = add_model_103(registers, offset, &mut locations);
-        let offset = add_model_701(registers, offset, &mut locations);
-        let offset = add_model_702(registers, offset, &mut locations);
-        let offset = add_model_703(registers, offset, &mut locations);
-        let offset = add_model_713(registers, offset, &mut locations);
+        let mut offset = base + 2;
+        if enabled_models.is_none_or(|v| v.contains(&1)) {
+            offset = add_model_1(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&103)) {
+            offset = add_model_103(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&701)) {
+            offset = add_model_701(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&702)) {
+            offset = add_model_702(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&703)) {
+            offset = add_model_703(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&713)) {
+            offset = add_model_713(registers, offset, &mut locations);
+        }
         add_end_of_model(registers, offset);
     }
 

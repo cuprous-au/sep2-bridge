@@ -2,6 +2,7 @@ use async_broadcast::Sender as BroadcastSender;
 use derive_more::Display;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use sunspec::{
+    Model,
     client::{AsyncClient, AsyncDevice, Config},
     models::{
         model1::Model1,
@@ -31,7 +32,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug)]
 pub enum Event {
     CapabilitiesPolled(Capabilities),
-    StatePolled(Status, Settings, Metering),
+    StatePolled(Option<Status>, Option<Settings>, Option<Metering>),
 }
 
 #[derive(Clone, Debug)]
@@ -104,11 +105,13 @@ pub async fn task(
                 }
                 Ok(Ok((new_device, capabilities))) => {
                     device_opt = Some(new_device);
-                    log::trace!("Broadcasting CapabilitiesPolled");
-                    output_ch
-                        .broadcast(Event::CapabilitiesPolled(capabilities))
-                        .await
-                        .map_err(|_| crate::Error::ChannelClosed)?;
+                    if let Some(capabilities) = capabilities {
+                        log::trace!("Broadcasting CapabilitiesPolled");
+                        output_ch
+                            .broadcast(Event::CapabilitiesPolled(capabilities))
+                            .await
+                            .map_err(|_| crate::Error::ChannelClosed)?;
+                    }
                     // As the device may have been restarted, we reset our last
                     // sent parameters to indicate we don't know what the device
                     // is set to and prompt this task to send the parameters again.
@@ -165,12 +168,12 @@ pub async fn task(
 }
 
 /// Given a modbus socket target, attempt to connect and probe the device
-/// capabilities. On success, returns the modbus device and a capabilities
-/// structure.
+/// capabilities. On success, returns the modbus device and an optional
+/// capabilities structure if the probe was successful.
 async fn establish_connection(
     socket: &Transport,
     device_id: u8,
-) -> Result<(AsyncDevice<TokioModbusContext>, Capabilities)> {
+) -> Result<(AsyncDevice<TokioModbusContext>, Option<Capabilities>)> {
     let context = match socket {
         Transport::Unix(path) => {
             let stream = UnixStream::connect(path).await.map_err(|err| {
@@ -193,6 +196,37 @@ async fn establish_connection(
     let config = Config::default();
     let client = AsyncClient::new(context, config);
     let device = client.device(device_id).await.map_err(comm_err)?;
+
+    // Technically the information in model 1 is not needed for the SEP2
+    // communication for a DER. However, it is a good sanity check on the
+    // modbus connection.
+    let m1: Model1 = device.read_model().await.map_err(comm_err)?;
+
+    log::debug!("Model 1 data: {:?}", m1);
+
+    log::debug!(
+        "Supported models (and known to us): {}",
+        device
+            .models
+            .supported_model_ids()
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    for required_model in [701, 702, 703] {
+        if !device
+            .models
+            .supported_model_ids()
+            .contains(&required_model)
+        {
+            // Don't error but do warn if it is missing.
+            log::warn!(
+                "Model {required_model} is missing from device. This will impact communication with the SEP2 server."
+            );
+        }
+    }
 
     let capabilities = capabilities_query(&device).await?;
 
@@ -217,6 +251,17 @@ async fn drop_connection(device_opt: Option<AsyncDevice<TokioModbusContext>>, er
     if let Some(device) = device_opt {
         let _ = device.client.lock().await.disconnect().await;
     }
+}
+
+/// The read_model method doesn't check if the model is supported. This function
+/// wraps read_model with a check and returns None if the model isn't supported
+/// by the device.
+async fn read_model_safe<M: Model>(device: &AsyncDevice<TokioModbusContext>) -> Result<Option<M>> {
+    if !device.models.supported_model_ids().contains(&M::ID) {
+        return Ok(None);
+    }
+
+    Ok(Some(device.read_model().await.map_err(comm_err)?))
 }
 
 /////
@@ -263,40 +308,14 @@ impl From<Model702> for Capabilities {
         }
     }
 }
-async fn capabilities_query(device: &AsyncDevice<TokioModbusContext>) -> Result<Capabilities> {
+async fn capabilities_query(
+    device: &AsyncDevice<TokioModbusContext>,
+) -> Result<Option<Capabilities>> {
     log::trace!("Query capabilities");
 
-    // Technically the information in model 1 is not needed for the SEP2
-    // communication for a DER. However, it is a good sanity check on the
-    // modbus connection.
-    let m1: Model1 = device.read_model().await.map_err(comm_err)?;
-
-    log::debug!("Model 1 data: {:?}", m1);
-
-    log::debug!(
-        "Supported models (and known to us): {}",
-        device
-            .models
-            .supported_model_ids()
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    for required_model in [701, 702, 703, 713] {
-        if !device
-            .models
-            .supported_model_ids()
-            .contains(&required_model)
-        {
-            return Err(Error::MissingModel(required_model));
-        }
-    }
-
-    let m702: Model702 = device.read_model().await.map_err(comm_err)?;
-
-    Ok(Capabilities::from(m702))
+    read_model_safe::<Model702>(device)
+        .await
+        .map(|opt| opt.map(Capabilities::from))
 }
 
 #[derive(Clone, Debug)]
@@ -308,13 +327,19 @@ pub struct Status {
 }
 
 impl Status {
-    fn from(m701: &Model701, m713: &Model713) -> Self {
-        Status {
-            st: m701.st,
-            conn_st: m701.conn_st,
-            alrm: m701.alrm,
-            soc: m713.soc,
+    fn from(m701: &Option<Model701>, m713: &Option<Model713>) -> Option<Self> {
+        if m701.is_none() && m713.is_none() {
+            return None;
         }
+
+        let m701 = m701.as_ref();
+        let m713 = m713.as_ref();
+        Some(Status {
+            st: m701.and_then(|m701| m701.st),
+            conn_st: m701.and_then(|m701| m701.conn_st),
+            alrm: m701.and_then(|m701| m701.alrm),
+            soc: m713.and_then(|m713| m713.soc),
+        })
     }
 }
 
@@ -325,10 +350,10 @@ pub struct Settings {
 }
 
 impl Settings {
-    fn from(m703: &Model703) -> Self {
-        Settings {
+    fn from(m703: &Option<Model703>) -> Option<Self> {
+        m703.as_ref().map(|m703| Settings {
             esv_hi: m703.esv_hi,
-        }
+        })
     }
 }
 
@@ -356,44 +381,49 @@ pub enum PhaseReference {
 }
 
 impl Metering {
-    fn from(m701: &Model701) -> Self {
-        // Collecting up all voltages into a vector rather than hardcoding them.
-        let voltages = [
-            m701.llv
-                .map(|v| VoltageWithReference(v, PhaseReference::LLV)),
-            m701.lnv
-                .map(|v| VoltageWithReference(v, PhaseReference::LNV)),
-            m701.vl1l2
-                .map(|v| VoltageWithReference(v, PhaseReference::VL1L2)),
-            m701.vl1
-                .map(|v| VoltageWithReference(v, PhaseReference::VL1)),
-            m701.vl2l3
-                .map(|v| VoltageWithReference(v, PhaseReference::VL2L3)),
-            m701.vl2
-                .map(|v| VoltageWithReference(v, PhaseReference::VL2)),
-            m701.vl3l1
-                .map(|v| VoltageWithReference(v, PhaseReference::VL3L1)),
-            m701.vl3
-                .map(|v| VoltageWithReference(v, PhaseReference::VL3)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        Metering {
-            active_power: m701.w,
-            reactive_power: m701.var,
-            voltages,
-            frequency: m701.hz,
+    fn from(m701: &Option<Model701>) -> Option<Self> {
+        match m701.as_ref() {
+            None => None,
+            Some(m701) => {
+                // Collecting up all voltages into a vector rather than hardcoding them.
+                let voltages = [
+                    m701.llv
+                        .map(|v| VoltageWithReference(v, PhaseReference::LLV)),
+                    m701.lnv
+                        .map(|v| VoltageWithReference(v, PhaseReference::LNV)),
+                    m701.vl1l2
+                        .map(|v| VoltageWithReference(v, PhaseReference::VL1L2)),
+                    m701.vl1
+                        .map(|v| VoltageWithReference(v, PhaseReference::VL1)),
+                    m701.vl2l3
+                        .map(|v| VoltageWithReference(v, PhaseReference::VL2L3)),
+                    m701.vl2
+                        .map(|v| VoltageWithReference(v, PhaseReference::VL2)),
+                    m701.vl3l1
+                        .map(|v| VoltageWithReference(v, PhaseReference::VL3L1)),
+                    m701.vl3
+                        .map(|v| VoltageWithReference(v, PhaseReference::VL3)),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                Some(Metering {
+                    active_power: m701.w,
+                    reactive_power: m701.var,
+                    voltages,
+                    frequency: m701.hz,
+                })
+            }
         }
     }
 }
 
 async fn poll_device_state(
     device: &AsyncDevice<TokioModbusContext>,
-) -> Result<(Status, Settings, Metering)> {
-    let m701: Model701 = device.read_model().await.map_err(comm_err)?;
-    let m703: Model703 = device.read_model().await.map_err(comm_err)?;
-    let m713: Model713 = device.read_model().await.map_err(comm_err)?;
+) -> Result<(Option<Status>, Option<Settings>, Option<Metering>)> {
+    let m701 = read_model_safe::<Model701>(device).await?;
+    let m703 = read_model_safe::<Model703>(device).await?;
+    let m713 = read_model_safe::<Model713>(device).await?;
 
     Ok((
         Status::from(&m701, &m713),

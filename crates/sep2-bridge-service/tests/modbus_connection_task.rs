@@ -20,7 +20,7 @@ const WAIT_POLL_TIME: Duration = Duration::from_millis(1200);
 /// Tests that a device receives parameters when a control is applied.
 #[tokio::test]
 async fn sends_parameters_to_device() {
-    let (mock, _task, input_ch, _output_ch) = setup().await;
+    let (mock, _task, input_ch, _output_ch) = setup(None).await;
 
     // Provide a parameters command
     input_ch
@@ -45,7 +45,7 @@ async fn sends_parameters_to_device() {
 #[tokio::test]
 async fn reads_device_state() {
     // Setup
-    let (mock, _task, _input_ch, mut output_ch) = setup().await;
+    let (mock, _task, _input_ch, mut output_ch) = setup(None).await;
 
     // Wait for first poll of the device
     time::sleep(WAIT_POLL_TIME).await;
@@ -71,15 +71,15 @@ async fn reads_device_state() {
         all_events
             .iter()
             .any(|ev| matches!(ev, modbus_connection::Event::StatePolled(
-                Status {
+                Some(Status {
                     st, ..
-                },
-                Settings {
+                }),
+                Some(Settings {
                     esv_hi
-                },
-                Metering {
+                }),
+                Some(Metering {
                     active_power, ..
-                },
+                }),
             ) if esv_hi == &expected_esv_hi && st == &expected_st && active_power == &expected_w
             ))
     );
@@ -89,7 +89,7 @@ async fn reads_device_state() {
 #[tokio::test]
 async fn reconnects() {
     // Setup
-    let (mut mock, _task, _input_ch, mut output_ch) = setup().await;
+    let (mut mock, _task, _input_ch, mut output_ch) = setup(None).await;
 
     // Wait for first poll of the device
     time::sleep(WAIT_POLL_TIME).await;
@@ -126,17 +126,102 @@ async fn reconnects() {
     ));
 }
 
+/// Tests whether the task tolerates missing capabilities (model 702)
+#[tokio::test]
+async fn tolerates_missing_capabilities() {
+    // Setup
+    let (_mock, task, _input_ch, mut output_ch) = setup(Some(&[1, 701, 703])).await;
+
+    // Wait for first poll of the device
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // We expect to have received a status from the mock, but no capabilities.
+    let all_events = collect_all(&mut output_ch).await;
+    assert!(!all_events.iter().any(|ev| matches!(
+        ev,
+        modbus_connection::Event::CapabilitiesPolled(Capabilities { .. })
+    )));
+    assert!(all_events.iter().any(|ev| matches!(
+        ev,
+        modbus_connection::Event::StatePolled(Some(_status), Some(_settings), Some(_metering)),
+    )));
+
+    // And the task should still be active.
+    assert!(!task.is_finished());
+}
+
+/// Tests whether the task tolerates missing meter readings (model 701)
+#[tokio::test]
+async fn tolerates_missing_metering() {
+    // Setup
+    let (_mock, task, _input_ch, mut output_ch) = setup(Some(&[1, 702, 703])).await;
+
+    // Wait for first poll of the device
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // We expect to have received a status from the mock, but no capabilities.
+    let all_events = collect_all(&mut output_ch).await;
+    assert!(all_events.iter().any(|ev| matches!(
+        ev,
+        modbus_connection::Event::CapabilitiesPolled(Capabilities { .. })
+    )));
+    assert!(!all_events.iter().any(|ev| matches!(
+        ev,
+        modbus_connection::Event::StatePolled(_status, _settings, Some(_metering)),
+    )));
+
+    // And the task should still be active.
+    assert!(!task.is_finished());
+}
+
+/// Tests whether the task tolerates missing control parameter locations
+#[tokio::test]
+async fn tolerates_missing_control_parameters() {
+    // Setup
+    let (_mock, task, input_ch, mut output_ch) = setup(Some(&[1, 701, 702])).await;
+
+    // Provide a parameters command
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                es: Some(model703::Es::Enabled),
+                esvhi: None,
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    // Wait for first poll of the device
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // We expect to have received a polled state but no errors
+    let all_events = collect_all(&mut output_ch).await;
+    assert!(all_events.iter().any(|ev| matches!(
+        ev,
+        modbus_connection::Event::CapabilitiesPolled(Capabilities { .. })
+    )));
+    assert!(all_events.iter().any(|ev| matches!(
+        ev,
+        modbus_connection::Event::StatePolled(_status, _settings, Some(_metering)),
+    )));
+
+    // And the task should still be active.
+    assert!(!task.is_finished());
+}
+
 /////
 // Helpers
 
 /// Sets up the modbus server mock and starts the modbus connection task.
-async fn setup() -> (
+async fn setup(
+    enabled_models: Option<&[u32]>,
+) -> (
     SunSpecMock,
     JoinHandle<Result<()>>,
     mpsc::Sender<modbus_connection::Command>,
     async_broadcast::Receiver<modbus_connection::Event>,
 ) {
-    let mut mock = SunSpecMock::new()
+    let mut mock = SunSpecMock::new(enabled_models)
         .await
         .expect("Couldn't create mock modbus server");
     mock.start()
