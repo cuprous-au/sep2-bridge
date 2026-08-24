@@ -294,6 +294,7 @@ pub fn add_model_701(
 
     let offset = base_offset + 2;
     Model701::W.fill_registers(registers, offset, Some(12500));
+    locations.insert("model701::W".into(), location(Model701::W, offset));
     Model701::W_SF.fill_registers(registers, offset, Some(-1));
 
     Model701::VAR.fill_registers(registers, offset, Some(500));

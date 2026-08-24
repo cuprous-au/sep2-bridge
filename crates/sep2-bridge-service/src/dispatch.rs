@@ -126,7 +126,7 @@ pub async fn sep2_device_state_dispatcher(
                     );
                 }
             },
-            modbus_connection::Event::StatePolled(status, settings) => {
+            modbus_connection::Event::StatePolled(status, settings, metering) => {
                 match status.try_convert() {
                     Ok(der_status) => {
                         sep2_conn_input
@@ -150,6 +150,19 @@ pub async fn sep2_device_state_dispatcher(
                     Err(err) => {
                         log::warn!(
                             "Failed to translate modbus device status to SEP2 DERStatus: {err}"
+                        );
+                    }
+                };
+                match metering.try_convert() {
+                    Ok(meter_readings) => {
+                        sep2_conn_input
+                            .send(sep2_connection::Command::SendMeterReadings(meter_readings))
+                            .await
+                            .map_err(|_| Error::ChannelClosed)?;
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "Failed to translate modbus device meter readings to SEP2 MirrorMeterReadings: {err}"
                         );
                     }
                 };

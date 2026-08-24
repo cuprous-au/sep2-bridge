@@ -4,29 +4,34 @@ use sep2_client::{
     client::{Client, SEPResponse},
     device::SEDevice,
 };
-use sep2_common::packages::{
-    dcap::DeviceCapability,
-    der::{
-        DER, DERCapability, DERControlList, DERList, DERProgramList, DERSettings, DERStatus,
-        DefaultDERControl,
+use sep2_common::{
+    mrid_gen,
+    packages::{
+        dcap::DeviceCapability,
+        der::{
+            DER, DERCapability, DERControlList, DERList, DERProgramList, DERSettings, DERStatus,
+            DefaultDERControl,
+        },
+        edev::{EndDevice, EndDeviceList, Registration},
+        fsa::FunctionSetAssignmentsList,
+        identification::ResponseStatus,
+        metering_mirror::{MirrorMeterReading, MirrorUsagePoint, MirrorUsagePointList},
+        primitives::{HexBinary160, Int64, Uint32},
+        response::DERControlResponse,
+        time::Time,
+        types::{MRIDType, PINType, PhaseCode, UomType, UsagePointStatus},
     },
-    edev::{EndDevice, EndDeviceList, Registration},
-    fsa::FunctionSetAssignmentsList,
-    identification::ResponseStatus,
-    primitives::{HexBinary160, Int64, Uint32},
-    response::DERControlResponse,
-    time::Time,
-    types::{MRIDType, PINType},
 };
+use std::hash::{Hash, Hasher};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
 use tokio::{
     sync::mpsc::{Receiver as MpscReceiver, Sender as MpscSender},
     task::{self, JoinHandle},
-    time,
+    time::{self, Instant},
 };
 
 use crate::{Error, ResourceKind, Result};
@@ -85,6 +90,7 @@ pub enum Command {
     SendDeviceCapability(DERCapability),
     SendDeviceSettings(DERSettings),
     SendControlResponse(ControlResponse),
+    SendMeterReadings(Vec<MirrorMeterReading>),
 
     /// Sent on initial start or by the retry task.
     Wake,
@@ -123,11 +129,13 @@ impl ControlResponse {
 }
 
 pub struct Sep2ConnectionArgs {
+    pub client: Client,
     pub dcap_uri: String,
     pub max_list_size: u32,
     pub default_poll_rate: u32,
     pub device_to_register: SEDevice,
     pub expected_pin: Option<PINType>,
+    pub pen: u32,
 }
 
 /// Manages communication to and from the SEP2 server.
@@ -140,7 +148,6 @@ pub async fn task(
     output_ch: BroadcastSender<Sep2ResourceEvent>,
     mut input_ch: MpscReceiver<Command>,
     input_ch_tx: MpscSender<Command>,
-    client: Client,
     args: Sep2ConnectionArgs,
 ) -> Result<()> {
     // Various resources we only need to lookup once.
@@ -150,6 +157,8 @@ pub async fn task(
     let mut setup_root_polling_done = false;
     let mut der_option = None;
 
+    const POST_RATE_GENERIC: Duration = Duration::from_secs(60);
+    const POST_RATE_CAPABILITIES: Duration = Duration::from_hours(24);
     // Queues for messages that we need to send or retry.
     // The choice of 30 is intended to be larger than the SEP2 maximum number of
     // controls of 24 with a bit of extra leeway. In practical usage this should
@@ -158,10 +167,17 @@ pub async fn task(
     // The response queue has newer messages pushed onto the back and popped from the front.
     let mut control_response_queue = VecDeque::new();
     let mut latest_device_settings = None;
+    let mut last_sent_device_settings = None;
     let mut latest_device_status = None;
+    let mut last_sent_device_status = None;
     // Capabilities is a little different, we won't get these often so keep a record of them.
     let mut device_capabilities = None;
-    let mut device_capabilities_sent = false;
+    let mut last_sent_device_capabilities = None;
+    // Meter readings
+    let mut latest_meter_readings = None;
+    let mut last_sent_meter_readings = None;
+    let mut mirror_usage_point = None;
+    let mut reading_mrid_cache = HashMap::new();
 
     let mut retry_task_handle: Option<JoinHandle<_>> = None;
     let mut retry_requested: bool = false;
@@ -202,7 +218,7 @@ pub async fn task(
 
                 start_poll_for(
                     kind,
-                    client.clone(),
+                    args.client.clone(),
                     &href,
                     args.default_poll_rate,
                     args.max_list_size,
@@ -227,13 +243,17 @@ pub async fn task(
                 log::trace!("Received device capabilities");
                 if Some(&capabilities) != device_capabilities.as_ref() {
                     device_capabilities = Some(capabilities);
-                    // TODO: We also need to send the DERCapability regularly even if it hasn't changed.
-                    device_capabilities_sent = false;
+                    // Reset the last sent as we need to update the server immediately.
+                    last_sent_device_capabilities = None;
                 }
             }
             Command::SendDeviceStatus(status) => {
                 log::trace!("Received device status");
                 latest_device_status = Some(status);
+            }
+            Command::SendMeterReadings(readings) => {
+                log::trace!("Received meter readings");
+                latest_meter_readings = Some(readings);
             }
             Command::SendControlResponse(response) => {
                 control_response_queue.push_back(response);
@@ -264,7 +284,7 @@ pub async fn task(
 
         // Ensuring we have a dcap is highest priority.
         if dcap_option.is_none() {
-            dcap_option = get_dcap(client.clone(), &args.dcap_uri).await;
+            dcap_option = get_dcap(args.client.clone(), &args.dcap_uri).await;
         }
         let Some(dcap) = dcap_option.as_ref() else {
             continue;
@@ -284,7 +304,7 @@ pub async fn task(
         // Ensure our device is registered with the server.
         if server_device.is_none() {
             server_device = ensure_device_registered(
-                client.clone(),
+                args.client.clone(),
                 &edev_link.href,
                 &args.device_to_register,
                 args.max_list_size,
@@ -302,7 +322,7 @@ pub async fn task(
             && let Some(expected_pin) = args.expected_pin
         {
             let reg_info = server_registration_info.insert(
-                match client.get::<Registration>(&reg_link.href).await {
+                match args.client.get::<Registration>(&reg_link.href).await {
                     Ok(reg) => reg,
                     Err(_) => {
                         log::error!("Unable to get device registration. Retrying");
@@ -326,7 +346,7 @@ pub async fn task(
             // Setup polls for edev list and time link. All other polls will be created
             // after receiving these responses.
             start_root_polling(
-                client.clone(),
+                args.client.clone(),
                 &edev_link.href,
                 &tm_link.href,
                 args.default_poll_rate,
@@ -340,7 +360,7 @@ pub async fn task(
         // If there are updates in the status update queue, try and send them out.
         if send_control_responses(
             &mut control_response_queue,
-            client.clone(),
+            args.client.clone(),
             args.device_to_register.lfdi,
         )
         .await
@@ -350,22 +370,27 @@ pub async fn task(
 
         // Ensure we have the DER resource with endpoints to post device settings and capabilities to.
         if der_option.is_none() {
-            der_option = ensure_der(client.clone(), server_device, args.max_list_size).await;
+            der_option = ensure_der(args.client.clone(), server_device, args.max_list_size).await;
         }
         let Some(der) = der_option.as_ref() else {
             continue;
         };
 
         // Attempt to send new device settings if we have a valid link.
-        if let (Some(device_settings), Some(link)) = (
-            latest_device_settings.as_ref(),
-            der.der_settings_link.as_ref(),
-        ) {
+        if last_sent_device_settings
+            .is_none_or(|time| Instant::now().duration_since(time) > POST_RATE_GENERIC)
+            && let (Some(device_settings), Some(link)) = (
+                latest_device_settings.as_ref(),
+                der.der_settings_link.as_ref(),
+            )
+        {
             log::trace!("Sending settings update");
-            match client.put(&link.href, device_settings).await {
+            match args.client.put(&link.href, device_settings).await {
                 Ok(_) => {
                     // This is done now, don't retry sending these same settings.
+                    log::debug!("Sent settings");
                     latest_device_settings = None;
+                    last_sent_device_settings = Some(Instant::now());
                 }
                 Err(err) => {
                     log::error!("Unable to post our settings to upstream ({err}). Will retry.");
@@ -375,14 +400,18 @@ pub async fn task(
         }
 
         // Attempt to send a new device status if we have a valid link
-        if let (Some(der_status), Some(link)) =
-            (latest_device_status.as_ref(), der.der_status_link.as_ref())
+        if last_sent_device_status
+            .is_none_or(|time| Instant::now().duration_since(time) > POST_RATE_GENERIC)
+            && let (Some(der_status), Some(link)) =
+                (latest_device_status.as_ref(), der.der_status_link.as_ref())
         {
             log::trace!("Sending status update");
-            match client.put(&link.href, der_status).await {
+            match args.client.put(&link.href, der_status).await {
                 Ok(_) => {
                     // This is done now, don't retry sending these same settings.
+                    log::debug!("Sent status");
                     latest_device_status = None;
+                    last_sent_device_status = Some(Instant::now());
                 }
                 Err(err) => {
                     log::error!("Unable to post our status to upstream ({err}). Will retry.");
@@ -392,22 +421,47 @@ pub async fn task(
         }
 
         // Attempt to send device capabilities if we have a valid link.
-        if !device_capabilities_sent
+        if last_sent_device_capabilities
+            .is_none_or(|time| Instant::now().duration_since(time) > POST_RATE_CAPABILITIES)
             && let (Some(der_capabilities), Some(link)) = (
                 device_capabilities.as_ref(),
                 der.der_capability_link.as_ref(),
             )
         {
             log::trace!("Sending capabilities");
-            match client.put(&link.href, der_capabilities).await {
+            match args.client.put(&link.href, der_capabilities).await {
                 Ok(_) => {
                     // This is done now, don't retry sending these capabilities.
-                    device_capabilities_sent = true;
+                    log::debug!("Sent capabilities");
+                    last_sent_device_capabilities = Some(Instant::now());
                 }
                 Err(err) => {
                     log::error!("Unable to post our capabilities to upstream ({err}). Will retry.");
                     continue;
                 }
+            }
+        }
+
+        // Attempt to send meter readings.
+        if let Some(readings) = &latest_meter_readings
+            && last_sent_meter_readings
+                .is_none_or(|time| Instant::now().duration_since(time) > POST_RATE_GENERIC)
+        {
+            if send_meter_readings(
+                &args,
+                dcap,
+                &mut mirror_usage_point,
+                readings,
+                &mut reading_mrid_cache,
+            )
+            .await
+            {
+                // Retry requested
+                continue;
+            } else {
+                // We succeeded, forget the previous readings.
+                last_sent_meter_readings = Some(Instant::now());
+                latest_meter_readings = None;
             }
         }
 
@@ -660,4 +714,219 @@ async fn send_control_responses(
 
     // No retry required.
     false
+}
+
+/// Attempts to send meter readings that are queued. Returns true if a retry is required.
+async fn send_meter_readings(
+    args: &Sep2ConnectionArgs,
+    dcap: &DeviceCapability,
+    mirror_usage_point: &mut Option<String>,
+    readings: &Vec<MirrorMeterReading>,
+    reading_mrid_cache: &mut HashMap<CacheKey, MRIDType>,
+) -> bool {
+    // Note: we can't create a MUP until we have readings to attach to it. Kind
+    // of silly in my opinion and means we need to ensure the MUP link in the
+    // middle of our readings logic.
+
+    // Make sure we've initialised the mrid cache
+    if reading_mrid_cache.is_empty() {
+        *reading_mrid_cache = initialise_reading_mrid_cache(
+            args.client.clone(),
+            dcap,
+            args.device_to_register.lfdi,
+            args.max_list_size,
+        )
+        .await;
+    }
+
+    for reading in readings {
+        let Some(key) = reading_key(reading) else {
+            log::error!(
+                "Got an unknown cache key for a reading we are attempting to send. This should never happen, discarding reading."
+            );
+            // Don't retry, this will keep on happening. Instead discard this reading.
+            continue;
+        };
+
+        // Fill in a MRID from the cache, or generate one if the cache is empty.
+        let mrid = *reading_mrid_cache
+            .entry(key)
+            .or_insert_with(|| mrid_gen(args.pen));
+        let modified_reading = MirrorMeterReading {
+            mrid,
+            ..reading.clone()
+        };
+        if let Some(mup) = mirror_usage_point {
+            if let Err(err) = args.client.post(mup, &modified_reading).await {
+                log::error!("Unable to send meter readings ({err}). Will retry.");
+                return true;
+            }
+        } else {
+            // We lookup or create a MUP with this reading.
+            let Some(mupl_link) = dcap.mirror_usage_point_list_link.as_ref() else {
+                // It is unusual if the server doesn't have a MUP link. Keep retrying.
+                log::debug!("No MUP list link found. This is unexpected.");
+                return true;
+            };
+
+            *mirror_usage_point = ensure_mup(args, &mupl_link.href, modified_reading).await;
+
+            if mirror_usage_point.is_none() {
+                // If ensure_mup returned None, then this means we need to retry.
+                return true;
+            }
+        }
+    }
+
+    log::debug!("Sent meter readings");
+
+    false
+}
+
+/// Lookup the MirrorUsagePoint for this device. Returns the full MUP details or
+/// None if no MUP is registered
+async fn lookup_mup(
+    client: Client,
+    mupl_href: &str,
+    lfdi: HexBinary160,
+    max_list_size: u32,
+) -> Option<MirrorUsagePoint> {
+    let mup_list = match client
+        .get::<MirrorUsagePointList>(&paginated_uri(mupl_href, max_list_size))
+        .await
+    {
+        Ok(mupl) => mupl,
+        Err(err) => {
+            log::error!("Unable to retrieve MirrorUsagePointList ({err}). Retrying.");
+            return None;
+        }
+    };
+
+    // See if we already have a MUP registered.
+    mup_list
+        .mirror_usage_point
+        .iter()
+        .find(|mup| mup.device_lfdi == lfdi)
+        .cloned()
+}
+
+/// Looks up the MirrorUsagePoint for this device or creates it if not
+/// registered. Returns only the href to the MUP on success and returns None on
+/// failure.
+///
+/// Requires a reading to be able to send to the server. In both cases of the
+/// MUP being created, or the MUP pre-existing, this function will send the
+/// reading.
+async fn ensure_mup(
+    args: &Sep2ConnectionArgs,
+    mupl_href: &str,
+    reading: MirrorMeterReading,
+) -> Option<String> {
+    // See if we already have a MUP registered.
+    if let Some(mup) = lookup_mup(
+        args.client.clone(),
+        mupl_href,
+        args.device_to_register.lfdi,
+        args.max_list_size,
+    )
+    .await
+    {
+        let Some(href) = mup.href else {
+            log::error!("No href in MirrorUsagePoint response.");
+            return None;
+        };
+        log::debug!("Identified {} as MirrorUsagePoint", href);
+        // In this path we have a MUP and haven't sent any readings to the
+        // server. In the alternative path, a MUP is created and it must send a
+        // reading to do so. Hence, we also send the reading here.
+        if let Err(err) = args.client.post(&href, &reading).await {
+            log::error!("Unable to send meter readings ({err}). Will retry.");
+            return None;
+        }
+        return Some(href);
+    }
+
+    // If not, then we register a new MUP.
+    match args
+        .client
+        .post(
+            mupl_href,
+            &MirrorUsagePoint {
+                mrid: mrid_gen(args.pen),
+                device_lfdi: args.device_to_register.lfdi,
+                status: UsagePointStatus::On,
+                mirror_meter_reading: vec![reading],
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(SEPResponse::Created(Some(location))) => {
+            log::debug!("Registered MirrorUsagePoint at {}", location);
+            Some(location)
+        }
+        Ok(response) => {
+            log::error!("Unknown response to creating MirrorUsagePoint ({response}). Retrying.");
+            None
+        }
+        Err(err) => {
+            log::error!("Couldn't register MirrorUsagePoint ({err}). Retrying.");
+            None
+        }
+    }
+}
+
+/// Prepares the MRID cache for meter readings. Looks up existing
+/// MirrorMeterReadings in the server and identifies their MRIDs. Falls back to
+/// an empty cache if any issues are found.
+async fn initialise_reading_mrid_cache(
+    client: Client,
+    dcap: &DeviceCapability,
+    lfdi: HexBinary160,
+    max_list_size: u32,
+) -> HashMap<CacheKey, MRIDType> {
+    let Some(mupl_link) = dcap.mirror_usage_point_list_link.as_ref() else {
+        // We hope that this will get returned by the server soon.
+        log::debug!("No MUP list link found. This is unexpected.");
+        return HashMap::new();
+    };
+
+    let Some(mup) = lookup_mup(client.clone(), &mupl_link.href, lfdi, max_list_size).await else {
+        return HashMap::new();
+    };
+
+    // Look at the readings and extract a key for the hashmap.
+    // Note that we might find multiple readings with different MRIDs. In which
+    // case we let the HashMap automatically select one of them by key
+    // collisions and overwriting.
+    mup.mirror_meter_reading
+        .iter()
+        .filter_map(|reading| reading_key(reading).map(|key| (key, reading.mrid)))
+        .inspect(|(key, mrid)| {
+            log::debug!("Found existing MRID for MirrorMeterReading: {key:?} -> {mrid}")
+        })
+        .collect()
+}
+
+/// Returns a hashable key that is unique for all of the meter readings that we
+/// can send, that is a combination of measurement unit and a phase option. If
+/// the meter reading type is incomplete, returns None.
+fn reading_key(reading: &MirrorMeterReading) -> Option<CacheKey> {
+    reading.reading_type.as_ref().and_then(|reading_type| {
+        reading_type
+            .uom
+            .as_ref()
+            .map(|uom| CacheKey(*uom, reading_type.phase))
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CacheKey(UomType, Option<PhaseCode>);
+
+impl Hash for CacheKey {
+    /// Manual implementation to extract the integers of the key for hashing.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.0 as u8).hash(state);
+        (self.1.map(|x| x as u8)).hash(state);
+    }
 }
