@@ -5,23 +5,24 @@ use derive_more::Display;
 use sep2_common::packages::{
     der::{
         ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
-        DERCapability, DERControlType, DERSettings, DERStatus, OperationalModeStatusType,
-        OperationalModeStatusValue, PowerFactor, ReactivePower, ReactiveSusceptance,
-        StateOfChargeStatusType, VoltageRMS,
+        DERCapability, DERControlType, DERSettings, DERStatus, FreqDroopType,
+        OperationalModeStatusType, OperationalModeStatusValue, PowerFactor, ReactivePower,
+        ReactiveSusceptance, StateOfChargeStatusType, VoltageRMS,
     },
     metering::{Reading, ReadingType},
     metering_mirror::MirrorMeterReading,
     primitives::{Int16, Int48, Int64, String32, Uint16, Uint32},
     types::{
         AccumulationBehaviourType, CommodityType, DateTimeInterval, FlowDirectionType, KindType,
-        MRIDType, Percent, PhaseCode, PowerOfTenMultiplierType, UomType,
+        Percent, PhaseCode, PowerOfTenMultiplierType, SignedPercent, UomType,
     },
 };
-use sunspec::models::{model701, model702::CtrlModes, model703};
+use std::convert::TryFrom;
+use sunspec::models::{model701, model702::CtrlModes, model703, model704, model711};
 
 use crate::{
     modbus_connection::{
-        Capabilities as ModbusCapabilities, Metering as ModbusMetering,
+        Capabilities as ModbusCapabilities, Metering as ModbusMetering, Model711Ctl,
         Parameters as ModbusParameters, PhaseReference, Settings as ModbusSettings,
         Status as ModbusStatus, VoltageWithReference,
     },
@@ -50,6 +51,7 @@ pub enum Error {
     SignedOverflow,
     MandatoryNone,
     UnmappableInvalid,
+    OutOfRange,
     Unknown,
 }
 
@@ -161,41 +163,61 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
             }),
             ..Default::default()
         };
-        let template = MirrorMeterReading {
-            // We leave the MRID to be assigned by the sep2_connection task.
-            // However, it is mandatory in the struct so we assign a default.
-            mrid: MRIDType(0),
-            ..Default::default()
+
+        let power_template = |value: Option<i16>, phase| {
+            value
+                .map(|value| {
+                    Ok(MirrorMeterReading {
+                        description: Some(String32("w".into())),
+                        reading_type: Some(ReadingType {
+                            flow_direction: Some(FlowDirectionType::Reverse),
+                            kind: Some(KindType::Power),
+                            uom: Some(UomType::W),
+                            power_of_ten_multiplier: self
+                                .w_sf
+                                .try_convert()
+                                .map_err(|err| err.name("w_sf"))?,
+                            phase,
+                            ..template_reading_type.clone()
+                        }),
+                        reading: Some(Reading {
+                            value: Some(Int48(i64::from(value))),
+                            ..template_reading.clone()
+                        }),
+                        ..Default::default()
+                    })
+                })
+                .transpose()
         };
 
-        let active_power = self.active_power.map(|value| MirrorMeterReading {
-            description: Some(String32("active_power".into())),
-            reading_type: Some(ReadingType {
-                flow_direction: Some(FlowDirectionType::Reverse),
-                kind: Some(KindType::Power),
-                uom: Some(UomType::W),
-                ..template_reading_type.clone()
-            }),
-            reading: Some(Reading {
-                value: Some(Int48(i64::from(value))),
-                ..template_reading.clone()
-            }),
-            ..template.clone()
-        });
-        let reactive_power = self.reactive_power.map(|value| MirrorMeterReading {
-            description: Some(String32("reactive_power".into())),
-            reading_type: Some(ReadingType {
-                flow_direction: Some(FlowDirectionType::Reverse),
-                kind: Some(KindType::Power),
-                uom: Some(UomType::VAr),
-                ..template_reading_type.clone()
-            }),
-            reading: Some(Reading {
-                value: Some(Int48(i64::from(value))),
-                ..template_reading.clone()
-            }),
-            ..template.clone()
-        });
+        let w = power_template(self.w, None)?;
+        let wl1 = power_template(self.wl1, Some(PhaseCode::PhaseA))?;
+        let wl2 = power_template(self.wl2, Some(PhaseCode::PhaseB))?;
+        let wl3 = power_template(self.wl3, Some(PhaseCode::PhaseC))?;
+
+        let var = self
+            .var
+            .map(|value| {
+                Ok(MirrorMeterReading {
+                    description: Some(String32("reactive_power".into())),
+                    reading_type: Some(ReadingType {
+                        flow_direction: Some(FlowDirectionType::Reverse),
+                        kind: Some(KindType::Power),
+                        uom: Some(UomType::VAr),
+                        power_of_ten_multiplier: self
+                            .var_sf
+                            .try_convert()
+                            .map_err(|err| err.name("var_sf"))?,
+                        ..template_reading_type.clone()
+                    }),
+                    reading: Some(Reading {
+                        value: Some(Int48(i64::from(value))),
+                        ..template_reading.clone()
+                    }),
+                    ..Default::default()
+                })
+            })
+            .transpose()?;
         let voltages = self
             .voltages
             .iter()
@@ -206,6 +228,10 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                     reading_type: Some(ReadingType {
                         flow_direction: Some(FlowDirectionType::Forward),
                         phase: Some(phase.try_convert().map_err(|err| err.name("voltages"))?),
+                        power_of_ten_multiplier: self
+                            .var_sf
+                            .try_convert()
+                            .map_err(|err| err.name("var_sf"))?,
                         uom: Some(UomType::Voltage),
                         ..template_reading_type.clone()
                     }),
@@ -213,26 +239,35 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                         value: Some(Int48(i64::from(*v))),
                         ..template_reading.clone()
                     }),
-                    ..template.clone()
+                    ..Default::default()
                 })
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let frequency = self.frequency.map(|value| MirrorMeterReading {
-            description: Some(String32("frequency".into())),
-            reading_type: Some(ReadingType {
-                flow_direction: Some(FlowDirectionType::Reverse),
-                uom: Some(UomType::Hz),
-                ..template_reading_type.clone()
-            }),
-            reading: Some(Reading {
-                value: Some(Int48(i64::from(value))),
-                ..template_reading.clone()
-            }),
-            ..template.clone()
-        });
+        let hz = self
+            .hz
+            .map(|value| {
+                Ok(MirrorMeterReading {
+                    description: Some(String32("frequency".into())),
+                    reading_type: Some(ReadingType {
+                        flow_direction: Some(FlowDirectionType::Reverse),
+                        uom: Some(UomType::Hz),
+                        power_of_ten_multiplier: self
+                            .hz_sf
+                            .try_convert()
+                            .map_err(|err| err.name("hz_sf"))?,
+                        ..template_reading_type.clone()
+                    }),
+                    reading: Some(Reading {
+                        value: Some(Int48(i64::from(value))),
+                        ..template_reading.clone()
+                    }),
+                    ..Default::default()
+                })
+            })
+            .transpose()?;
 
-        Ok(vec![active_power, reactive_power, frequency]
+        Ok(vec![w, wl1, wl2, wl3, var, hz]
             .into_iter()
             .flatten()
             .chain(voltages)
@@ -242,16 +277,41 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
 
 impl TryConvert<ModbusParameters> for ControlAttributes {
     fn try_convert(self: ControlAttributes) -> Result<ModbusParameters> {
-        let es = self.base.op_mod_connect.map(|connect| match connect {
-            false => model703::Es::Disabled,
-            true => model703::Es::Enabled,
-        });
         Ok(ModbusParameters {
-            es,
-            esvhi: self
+            // AS5438 - Table 9
+            droop_ctl: self.base.op_mod_freq_droop.convert(),
+
+            // AS5438 - Table 10
+            es: self.base.op_mod_connect.convert(),
+            esv_hi: self
                 .set_es_high_volt
                 .try_convert()
-                .map_err(|err| err.name("esvhi"))?,
+                .map_err(|err| err.name("esv_hi"))?,
+            esv_lo: self
+                .set_es_low_volt
+                .try_convert()
+                .map_err(|err| err.name("esv_lo"))?,
+            es_hz_hi: self.set_es_high_freq.convert(),
+            es_hz_lo: self.set_es_low_freq.convert(),
+            es_dly_tms: self.set_es_delay.convert(),
+            es_rnd_tms: self.set_es_random_delay.convert(),
+            es_rmp_tms: self.set_es_ramp_tms.convert(),
+
+            // AS5438 - Table 11
+            w_max_lim_pct_ena: self.base.op_mod_max_lim_w.is_some().convert(),
+            w_max_lim_pct: self
+                .base
+                .op_mod_max_lim_w
+                .try_convert()
+                .map_err(|err| err.name("w_max_lim_pct"))?,
+
+            // AS5438 - Table 12
+            w_set_ena: self.base.op_mod_fixed_w.is_some().convert(),
+            w_set_pct: self
+                .base
+                .op_mod_fixed_w
+                .try_convert()
+                .map_err(|err| err.name("w_set_pct"))?,
         })
     }
 }
@@ -480,12 +540,104 @@ impl TryConvertUnnamed<PhaseCode> for PhaseReference {
     }
 }
 
+impl TryConvertUnnamed<PowerOfTenMultiplierType> for i16 {
+    fn try_convert(self) -> ResultUnnamed<PowerOfTenMultiplierType> {
+        Ok(match self {
+            -9 => PowerOfTenMultiplierType::Nano,
+            -8 => PowerOfTenMultiplierType::NegativeEight,
+            -7 => PowerOfTenMultiplierType::NegativeSeven,
+            -6 => PowerOfTenMultiplierType::Micro,
+            -5 => PowerOfTenMultiplierType::NegativeFive,
+            -4 => PowerOfTenMultiplierType::NegativeFour,
+            -3 => PowerOfTenMultiplierType::Milli,
+            -2 => PowerOfTenMultiplierType::Centi,
+            -1 => PowerOfTenMultiplierType::Deci,
+            0 => PowerOfTenMultiplierType::None,
+            1 => PowerOfTenMultiplierType::Deca,
+            2 => PowerOfTenMultiplierType::Hecto,
+            3 => PowerOfTenMultiplierType::Kilo,
+            4 => PowerOfTenMultiplierType::Four,
+            5 => PowerOfTenMultiplierType::Five,
+            6 => PowerOfTenMultiplierType::Mega,
+            7 => PowerOfTenMultiplierType::Seven,
+            8 => PowerOfTenMultiplierType::Eight,
+            9 => PowerOfTenMultiplierType::Giga,
+            _ => Err(Error::OutOfRange)?,
+        })
+    }
+}
+
 //////
 // Internals for converting to modbus.
 impl TryConvertUnnamed<u16> for Int16 {
     fn try_convert(self: Int16) -> ResultUnnamed<u16> {
         // Raise errors on negative values.
         u16::try_from(self.0).map_err(|_| Error::UnsignedNegative)
+    }
+}
+
+impl Convert<u32> for Uint16 {
+    fn convert(self: Uint16) -> u32 {
+        u32::from(self.0)
+    }
+}
+
+impl Convert<u32> for Uint32 {
+    fn convert(self: Uint32) -> u32 {
+        self.0
+    }
+}
+
+impl Convert<u16> for Percent {
+    fn convert(self) -> u16 {
+        self.get()
+    }
+}
+
+impl Convert<i16> for SignedPercent {
+    fn convert(self) -> i16 {
+        self.get()
+    }
+}
+
+impl Convert<Option<model704::WMaxLimPctEna>> for bool {
+    fn convert(self: bool) -> Option<model704::WMaxLimPctEna> {
+        match self {
+            false => Some(model704::WMaxLimPctEna::Disabled),
+            true => Some(model704::WMaxLimPctEna::Enabled),
+        }
+    }
+}
+
+impl Convert<Option<model704::WSetEna>> for bool {
+    fn convert(self: bool) -> Option<model704::WSetEna> {
+        match self {
+            false => Some(model704::WSetEna::Disabled),
+            true => Some(model704::WSetEna::Enabled),
+        }
+    }
+}
+
+impl Convert<model703::Es> for bool {
+    fn convert(self: bool) -> model703::Es {
+        match self {
+            false => model703::Es::Disabled,
+            true => model703::Es::Enabled,
+        }
+    }
+}
+
+impl Convert<Model711Ctl> for FreqDroopType {
+    fn convert(self: FreqDroopType) -> Model711Ctl {
+        Model711Ctl(model711::Ctl {
+            db_of: self.d_bof.0,
+            db_uf: self.d_buf.0,
+            k_of: self.k_of.0,
+            k_uf: self.k_uf.0,
+            rsp_tms: self.open_loop_tms.convert(),
+            p_min: None,
+            read_only: model711::CtlReadOnly::Rw,
+        })
     }
 }
 
@@ -626,10 +778,15 @@ mod tests {
     #[test]
     fn metering() {
         let metering = ModbusMetering {
-            active_power: Some(42),
-            reactive_power: Some(45),
+            w: Some(42),
+            w_sf: Some(-1),
+            var: Some(45),
+            var_sf: Some(1),
             voltages: vec![VoltageWithReference(10000, PhaseReference::VL1L2)],
-            frequency: Some(60),
+            v_sf: Some(0),
+            hz: Some(60),
+            hz_sf: None,
+            ..Default::default()
         };
 
         let result: Result<Vec<MirrorMeterReading>> = metering.try_convert();
