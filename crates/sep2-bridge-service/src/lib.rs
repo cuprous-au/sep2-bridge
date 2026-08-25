@@ -2,9 +2,12 @@ use derive_more::Display;
 
 pub mod dispatch;
 pub mod modbus_connection;
+mod scaled_value;
 pub mod scheduler;
 pub mod sep2_connection;
 mod translation;
+
+pub use scaled_value::{ScaledValue, ScaledValueInner};
 
 #[derive(Debug, Display)]
 pub enum Error {

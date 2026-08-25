@@ -18,9 +18,10 @@ use sep2_common::packages::{
     },
 };
 use std::convert::TryFrom;
-use sunspec::models::{model701, model702::CtrlModes, model703, model704, model711};
+use sunspec::models::{model701, model702::CtrlModes, model703, model704};
 
 use crate::{
+    ScaledValue,
     modbus_connection::{
         Capabilities as ModbusCapabilities, Metering as ModbusMetering, Model711Ctl,
         Parameters as ModbusParameters, PhaseReference, Settings as ModbusSettings,
@@ -30,6 +31,18 @@ use crate::{
 };
 
 pub type Result<T> = std::result::Result<T, NamedError>;
+
+// SEP2 fixes the scale of each of its quantities in the specification, rather
+// than carrying a scale factor alongside the value the way sunspec does. SEP2 uses:
+//
+// - hundredths for: percentages, frequencies and times.
+// - thousandths for: frequency droops
+const SEP2_HUNDREDTHS_SF: i16 = -2;
+const SEP2_THOUSANDTHS_SF: i16 = -3;
+
+// Sunspec does not define a scale factor for time units, but we include this
+// const to make the intention clear in the code.
+const SUNSPEC_SECONDS_SF: i16 = 0;
 
 #[derive(Clone, Debug)]
 pub struct NamedError {
@@ -286,16 +299,24 @@ impl TryConvert<ModbusParameters> for ControlAttributes {
             esv_hi: self
                 .set_es_high_volt
                 .try_convert()
-                .map_err(|err| err.name("esv_hi"))?,
+                .map_err(|err| err.name("esv_hi"))?
+                .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
             esv_lo: self
                 .set_es_low_volt
                 .try_convert()
-                .map_err(|err| err.name("esv_lo"))?,
-            es_hz_hi: self.set_es_high_freq.convert(),
-            es_hz_lo: self.set_es_low_freq.convert(),
-            es_dly_tms: self.set_es_delay.convert(),
-            es_rnd_tms: self.set_es_random_delay.convert(),
-            es_rmp_tms: self.set_es_ramp_tms.convert(),
+                .map_err(|err| err.name("esv_lo"))?
+                .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
+            es_hz_hi: self
+                .set_es_high_freq
+                .convert()
+                .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
+            es_hz_lo: self
+                .set_es_low_freq
+                .convert()
+                .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
+            es_dly_tms: self.set_es_delay.convert().map(es_time_to_seconds),
+            es_rnd_tms: self.set_es_random_delay.convert().map(es_time_to_seconds),
+            es_rmp_tms: self.set_es_ramp_tms.convert().map(es_time_to_seconds),
 
             // AS5438 - Table 11
             w_max_lim_pct_ena: self.base.op_mod_max_lim_w.is_some().convert(),
@@ -303,7 +324,8 @@ impl TryConvert<ModbusParameters> for ControlAttributes {
                 .base
                 .op_mod_max_lim_w
                 .try_convert()
-                .map_err(|err| err.name("w_max_lim_pct"))?,
+                .map_err(|err| err.name("w_max_lim_pct"))?
+                .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
 
             // AS5438 - Table 12
             w_set_ena: self.base.op_mod_fixed_w.is_some().convert(),
@@ -311,9 +333,16 @@ impl TryConvert<ModbusParameters> for ControlAttributes {
                 .base
                 .op_mod_fixed_w
                 .try_convert()
-                .map_err(|err| err.name("w_set_pct"))?,
+                .map_err(|err| err.name("w_set_pct"))?
+                .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
         })
     }
+}
+
+fn es_time_to_seconds(hundredths_of_a_second: u32) -> u32 {
+    ScaledValue::new(hundredths_of_a_second, SEP2_HUNDREDTHS_SF)
+        .rescale(SUNSPEC_SECONDS_SF)
+        .value
 }
 
 //////
@@ -384,6 +413,13 @@ impl TryConvertUnnamed<Int16> for u16 {
         Ok(Int16(
             i16::try_from(self).map_err(|_| Error::SignedOverflow)?,
         ))
+    }
+}
+
+// Int16s appear in percentages, which have a granuality of hundredths in SEP2.
+impl TryConvertUnnamed<Int16> for ScaledValue<u16> {
+    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<Int16> {
+        self.rescale(SEP2_HUNDREDTHS_SF).value.try_convert()
     }
 }
 
@@ -516,11 +552,16 @@ impl TryConvertUnnamed<DERAlarmStatus> for model701::Alrm {
     }
 }
 
-impl Convert<StateOfChargeStatusType> for u16 {
-    fn convert(self: u16) -> StateOfChargeStatusType {
+impl Convert<StateOfChargeStatusType> for ScaledValue<u16> {
+    fn convert(self: ScaledValue<u16>) -> StateOfChargeStatusType {
+        // SEP2 fixes the scale factor at -2 (hundredths of a percent)
+        let hundredths = self.rescale(SEP2_HUNDREDTHS_SF).value;
         StateOfChargeStatusType {
             date_time: Int64(Utc::now().timestamp()),
-            value: Percent::new(self).unwrap_or_default(),
+            // Percent::new returns None for values > 100%. Replace these with 100% instead.
+            value: Percent::new(hundredths).unwrap_or_else(|| {
+                Percent::new(10_000).expect("Percent::new(10_000) should always be Some")
+            }),
         }
     }
 }
@@ -629,15 +670,13 @@ impl Convert<model703::Es> for bool {
 
 impl Convert<Model711Ctl> for FreqDroopType {
     fn convert(self: FreqDroopType) -> Model711Ctl {
-        Model711Ctl(model711::Ctl {
-            db_of: self.d_bof.0,
-            db_uf: self.d_buf.0,
-            k_of: self.k_of.0,
-            k_uf: self.k_uf.0,
-            rsp_tms: self.open_loop_tms.convert(),
-            p_min: None,
-            read_only: model711::CtlReadOnly::Rw,
-        })
+        Model711Ctl {
+            db_of: ScaledValue::new(self.d_bof.0, SEP2_THOUSANDTHS_SF),
+            db_uf: ScaledValue::new(self.d_buf.0, SEP2_THOUSANDTHS_SF),
+            k_of: ScaledValue::new(self.k_of.0, SEP2_THOUSANDTHS_SF),
+            k_uf: ScaledValue::new(self.k_uf.0, SEP2_THOUSANDTHS_SF),
+            rsp_tms: ScaledValue::new(self.open_loop_tms.convert(), SEP2_HUNDREDTHS_SF),
+        }
     }
 }
 
@@ -730,10 +769,24 @@ mod tests {
 
     #[test]
     fn settings() {
-        let settings = ModbusSettings { esv_hi: Some(42) };
+        let settings = ModbusSettings {
+            esv_hi: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
+        };
 
         let result: Result<DERSettings> = settings.try_convert();
         assert!(result.is_ok());
+    }
+
+    /// Test translation of scale factor to SEP2.
+    #[test]
+    fn settings_rescaled_to_sep2() {
+        // A value of 24.5% translated.
+        let settings = ModbusSettings {
+            esv_hi: Some(ScaledValue::new(245, -1)),
+        };
+
+        let result: DERSettings = settings.try_convert().expect("Translation failed");
+        assert_eq!(result.set_es_high_volt, Some(Int16(2450)));
     }
 
     #[test]
@@ -743,11 +796,37 @@ mod tests {
             // TODO: once this is translatable, add a value back in.
             conn_st: None,
             alrm: Some(model701::Alrm::AcOverVolt),
-            soc: Some(42),
+            soc: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
         };
 
         let result: Result<DERStatus> = status.try_convert();
         assert!(result.is_ok());
+    }
+
+    /// SEP2 fixes the state of charge at hundredths of a percent, so whatever
+    /// scale the device reports it at has to be converted, not passed through.
+    #[test]
+    fn soc_rescaled_to_sep2() {
+        // A device reporting whole percent: 10% is 1000 hundredths.
+        let soc: StateOfChargeStatusType = ScaledValue::new(10u16, 0).convert();
+        assert_eq!(soc.value.get(), 1000);
+
+        // A device already reporting hundredths passes through unchanged.
+        let soc: StateOfChargeStatusType = ScaledValue::new(5000u16, -2).convert();
+        assert_eq!(soc.value.get(), 5000);
+
+        // And one reporting tenths of a percent.
+        let soc: StateOfChargeStatusType = ScaledValue::new(505u16, -1).convert();
+        assert_eq!(soc.value.get(), 5050);
+    }
+
+    /// An out of range state of charge should clamp to 100% rather than being None.
+    #[test]
+    fn soc_out_of_range_clamps_to_full() {
+        let soc: StateOfChargeStatusType = ScaledValue::new(700u16, 0).convert();
+        assert_eq!(soc.value.get(), 10_000);
+        let soc: StateOfChargeStatusType = ScaledValue::new(101u16, 0).convert();
+        assert_eq!(soc.value.get(), 10_000);
     }
 
     #[test]
@@ -806,5 +885,95 @@ mod tests {
 
         let result: Result<ModbusParameters> = parameters.try_convert();
         assert!(result.is_ok());
+    }
+
+    /// Every value handed to the modbus side must carry the scale factor SEP2
+    /// defines it at, so that it can be rescaled to whatever the device wants.
+    #[test]
+    fn parameters_carry_sep2_scale_factors() {
+        let parameters = ControlAttributes {
+            base: DERControlBase {
+                op_mod_max_lim_w: Some(Percent::new(8000).expect("Invalid percent")),
+                op_mod_fixed_w: Some(SignedPercent::new(-2500).expect("Invalid percent")),
+                ..Default::default()
+            },
+            // 24.50% and 20.00% of nominal voltage.
+            set_es_high_volt: Some(Int16(2450)),
+            set_es_low_volt: Some(Int16(2000)),
+            // 51.00 Hz and 49.00 Hz.
+            set_es_high_freq: Some(Uint16(5100)),
+            set_es_low_freq: Some(Uint16(4900)),
+            ..Default::default()
+        };
+
+        let result: ModbusParameters = parameters.try_convert().expect("Translation failed");
+
+        assert_eq!(result.esv_hi, Some(ScaledValue::new(2450, -2)));
+        assert_eq!(result.esv_lo, Some(ScaledValue::new(2000, -2)));
+        assert_eq!(result.es_hz_hi, Some(ScaledValue::new(5100, -2)));
+        assert_eq!(result.es_hz_lo, Some(ScaledValue::new(4900, -2)));
+        assert_eq!(result.w_max_lim_pct, Some(ScaledValue::new(8000, -2)));
+        assert_eq!(result.w_set_pct, Some(ScaledValue::new(-2500, -2)));
+    }
+
+    /// Times are the one group with no scale factor on the sunspec side, so
+    /// they must be converted directly.
+    #[test]
+    fn times_converted_to_whole_seconds() {
+        let parameters = ControlAttributes {
+            // 300s, 60s and 120s.
+            set_es_delay: Some(Uint32(30_000)),
+            set_es_random_delay: Some(Uint32(6_000)),
+            set_es_ramp_tms: Some(Uint32(12_000)),
+            ..Default::default()
+        };
+
+        let result: ModbusParameters = parameters.try_convert().expect("Translation failed");
+
+        assert_eq!(result.es_dly_tms, Some(300));
+        assert_eq!(result.es_rnd_tms, Some(60));
+        assert_eq!(result.es_rmp_tms, Some(120));
+    }
+
+    /// Sub-second times cannot be represented by model 703 at all, so they
+    /// round to the nearest second rather than being scaled the wrong way.
+    #[test]
+    fn sub_second_enter_service_times_round() {
+        let parameters = ControlAttributes {
+            // 0.4s, 0.6s and 1.2s.
+            set_es_delay: Some(Uint32(40)),
+            set_es_random_delay: Some(Uint32(60)),
+            set_es_ramp_tms: Some(Uint32(120)),
+            ..Default::default()
+        };
+
+        let result: ModbusParameters = parameters.try_convert().expect("Translation failed");
+
+        assert_eq!(result.es_dly_tms, Some(0));
+        assert_eq!(result.es_rnd_tms, Some(1));
+        assert_eq!(result.es_rmp_tms, Some(1));
+    }
+
+    /// Most of the frequency droop values are in thousandths, but the time is in hundredths.
+    #[test]
+    fn droop_carries_sep2_scale_factors() {
+        let droop = FreqDroopType {
+            // 0.360 Hz and 0.350 Hz.
+            d_bof: Uint32(360),
+            d_buf: Uint32(350),
+            // 0.050 and 0.040 per unit.
+            k_of: Uint16(50),
+            k_uf: Uint16(40),
+            // 5.00 seconds.
+            open_loop_tms: Uint16(500),
+        };
+
+        let result: Model711Ctl = droop.convert();
+
+        assert_eq!(result.db_of, ScaledValue::new(360, -3));
+        assert_eq!(result.db_uf, ScaledValue::new(350, -3));
+        assert_eq!(result.k_of, ScaledValue::new(50, -3));
+        assert_eq!(result.k_uf, ScaledValue::new(40, -3));
+        assert_eq!(result.rsp_tms, ScaledValue::new(500, -2));
     }
 }

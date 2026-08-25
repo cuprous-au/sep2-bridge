@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use modbus_server_mock::SunSpecMock;
 use sep2_bridge::{
-    Result,
-    modbus_connection::{self, Capabilities, Metering, Settings, Status, Transport},
+    Result, ScaledValue,
+    modbus_connection::{self, Capabilities, Metering, Model711Ctl, Settings, Status, Transport},
 };
 use sunspec::models::{model701, model703};
 use tokio::{
@@ -41,6 +41,101 @@ async fn sends_parameters_to_device() {
     assert_eq!(value, model703::Es::Enabled);
 }
 
+/// Tests that parameters are rescaled from whatever scale factor they arrive
+/// with to the one the device advertises.
+///
+/// The scale factors here are deliberately not the ones SEP2 fixes its values
+/// at, so this covers the rescale itself rather than the SEP2 translation.
+#[tokio::test]
+async fn rescales_parameters_to_device_scale_factors() {
+    let (mock, _task, input_ch, _output_ch) = setup(None).await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                // 24% and 20% of nominal voltage, to the mock's V_SF of -1.
+                esv_hi: Some(ScaledValue::new(24, 0)),
+                esv_lo: Some(ScaledValue::new(200, -1)),
+                // 51.0 Hz and 49.0 Hz, to the mock's HZ_SF of -3.
+                es_hz_hi: Some(ScaledValue::new(510, -1)),
+                es_hz_lo: Some(ScaledValue::new(4900, -2)),
+                // 80% and -25%, to the mock's SFs of 0 and -1.
+                w_max_lim_pct: Some(ScaledValue::new(800, -1)),
+                w_set_pct: Some(ScaledValue::new(-25, 0)),
+                droop_ctl: Some(Model711Ctl {
+                    // 1.00 Hz and 0.50 Hz, to the mock's DB_SF of -2.
+                    db_of: ScaledValue::new(1, 0),
+                    db_uf: ScaledValue::new(500, -3),
+                    // 0.05 and 0.04 per unit, to the mock's K_SF of -4.
+                    k_of: ScaledValue::new(5, -2),
+                    k_uf: ScaledValue::new(40, -3),
+                    // 5 seconds, to the mock's RSP_TMS_SF of 0.
+                    rsp_tms: ScaledValue::new(5000, -3),
+                }),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    assert_eq!(mock.get_value::<Option<u16>>("model703::ESV_HI"), Some(240));
+    assert_eq!(mock.get_value::<Option<u16>>("model703::ESV_LO"), Some(200));
+    assert_eq!(
+        mock.get_value::<Option<u32>>("model703::ES_HZ_HI"),
+        Some(51_000)
+    );
+    assert_eq!(
+        mock.get_value::<Option<u32>>("model703::ES_HZ_LO"),
+        Some(49_000)
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(80)
+    );
+    assert_eq!(
+        mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
+        Some(-250)
+    );
+    assert_eq!(mock.get_value::<u32>("model711::CTL_1::DB_OF"), 100);
+    assert_eq!(mock.get_value::<u32>("model711::CTL_1::DB_UF"), 50);
+    assert_eq!(mock.get_value::<u16>("model711::CTL_1::K_OF"), 500);
+    assert_eq!(mock.get_value::<u16>("model711::CTL_1::K_UF"), 400);
+    assert_eq!(mock.get_value::<u32>("model711::CTL_1::RSP_TMS"), 5);
+}
+
+/// Tests that a device which doesn't implement a scale factor register is
+/// treated as using a scale factor of zero, rather than failing the write.
+#[tokio::test]
+async fn tolerates_missing_scale_factors() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<i16>>("model703::V_SF", None);
+        mock.set_value::<Option<i16>>("model703::HZ_SF", None);
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                // 24.50% and 51.00 Hz, which fall back to whole units.
+                esv_hi: Some(ScaledValue::new(2450, -2)),
+                es_hz_hi: Some(ScaledValue::new(5100, -2)),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    assert_eq!(mock.get_value::<Option<u16>>("model703::ESV_HI"), Some(25));
+    assert_eq!(
+        mock.get_value::<Option<u32>>("model703::ES_HZ_HI"),
+        Some(51)
+    );
+}
+
 /// Tests the task reads and emits the device capabilities, status and state.
 #[tokio::test]
 async fn reads_device_state() {
@@ -54,9 +149,27 @@ async fn reads_device_state() {
     let all_events = collect_all(&mut output_ch).await;
 
     let expected_w_max_rtg = mock.get_value::<Option<u16>>("model702::W_MAX_RTG");
-    let expected_esv_hi = mock.get_value::<Option<u16>>("model703::ESV_HI");
     let expected_st = mock.get_value::<Option<model701::St>>("model701::ST");
     let expected_w = mock.get_value::<Option<i16>>("model701::W");
+
+    // Values that carry a scale factor must be reported with the scale factor
+    // the device advertises alongside them, not bare.
+    let expected_esv_hi = mock
+        .get_value::<Option<u16>>("model703::ESV_HI")
+        .map(|esv_hi| {
+            ScaledValue::new(
+                esv_hi,
+                mock.get_value::<Option<i16>>("model703::V_SF")
+                    .expect("Mock has no V_SF"),
+            )
+        });
+    let expected_soc = mock.get_value::<Option<u16>>("model713::SOC").map(|soc| {
+        ScaledValue::new(
+            soc,
+            mock.get_value::<Option<i16>>("model713::PCT_SF")
+                .expect("Mock has no PCT_SF"),
+        )
+    });
     // Expect received capabilities struct.
     assert!(all_events.iter().any(
         |ev| matches!(ev, modbus_connection::Event::CapabilitiesPolled(
@@ -72,7 +185,7 @@ async fn reads_device_state() {
             .iter()
             .any(|ev| matches!(ev, modbus_connection::Event::StatePolled(
                 Some(Status {
-                    st, ..
+                    st, soc, ..
                 }),
                 Some(Settings {
                     esv_hi
@@ -80,7 +193,10 @@ async fn reads_device_state() {
                 Some(Metering {
                     w, ..
                 }),
-            ) if esv_hi == &expected_esv_hi && st == &expected_st && w == &expected_w
+            ) if esv_hi == &expected_esv_hi
+                && soc == &expected_soc
+                && st == &expected_st
+                && w == &expected_w
             ))
     );
 }
@@ -212,9 +328,25 @@ async fn tolerates_missing_control_parameters() {
 /////
 // Helpers
 
-/// Sets up the modbus server mock and starts the modbus connection task.
+/// Sets up the modbus server mock with default values, and starts the modbus
+/// connection task.
 async fn setup(
     enabled_models: Option<&[u32]>,
+) -> (
+    SunSpecMock,
+    JoinHandle<Result<()>>,
+    mpsc::Sender<modbus_connection::Command>,
+    async_broadcast::Receiver<modbus_connection::Event>,
+) {
+    setup_with(enabled_models, |_| {}).await
+}
+
+/// Like setup, but also runs the callback `seed` against the mock before the
+/// server starts, so a test can vary what the device advertises without a race
+/// condition.
+async fn setup_with(
+    enabled_models: Option<&[u32]>,
+    seed: impl FnOnce(&SunSpecMock),
 ) -> (
     SunSpecMock,
     JoinHandle<Result<()>>,
@@ -224,6 +356,7 @@ async fn setup(
     let mut mock = SunSpecMock::new(enabled_models)
         .await
         .expect("Couldn't create mock modbus server");
+    seed(&mock);
     mock.start()
         .await
         .expect("Couldn't start mock modbus server");
