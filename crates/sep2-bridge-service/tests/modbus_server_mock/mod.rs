@@ -421,6 +421,14 @@ pub fn add_model_703(
         "model703::ES_RMP_TMS".into(),
         location(Model703::ES_RMP_TMS, offset),
     );
+
+    // Deliberately not the scale factors SEP2 fixes its own values at, so that
+    // anything written here has to be rescaled to land correctly.
+    Model703::V_SF.fill_registers(registers, offset, Some(-1));
+    locations.insert("model703::V_SF".into(), location(Model703::V_SF, offset));
+    Model703::HZ_SF.fill_registers(registers, offset, Some(-3));
+    locations.insert("model703::HZ_SF".into(), location(Model703::HZ_SF, offset));
+
     offset + usize::from(Model703::LEN)
 }
 
@@ -459,7 +467,13 @@ pub fn add_model_704(
         "model704::W_MAX_LIM_PCT".into(),
         location(Model704::W_MAX_LIM_PCT, offset),
     );
-    Model704::W_MAX_LIM_PCT_SF.fill_registers(registers, offset, Some(-2));
+    // Deliberately not the -2 SEP2 fixes its percentages at, so that a value
+    // written here has to be rescaled to land correctly.
+    Model704::W_MAX_LIM_PCT_SF.fill_registers(registers, offset, Some(0));
+    locations.insert(
+        "model704::W_MAX_LIM_PCT_SF".into(),
+        location(Model704::W_MAX_LIM_PCT_SF, offset),
+    );
 
     // AS5438 - Table 12
     Model704::W_SET_ENA.fill_registers(registers, offset, Some(model704::WSetEna::Disabled));
@@ -472,7 +486,11 @@ pub fn add_model_704(
         "model704::W_SET_PCT".into(),
         location(Model704::W_SET_PCT, offset),
     );
-    Model704::W_SET_PCT_SF.fill_registers(registers, offset, Some(-2));
+    Model704::W_SET_PCT_SF.fill_registers(registers, offset, Some(-1));
+    locations.insert(
+        "model704::W_SET_PCT_SF".into(),
+        location(Model704::W_SET_PCT_SF, offset),
+    );
 
     offset + usize::from(length)
 }
@@ -498,9 +516,18 @@ pub fn add_model_711(
     let offset = base_offset + 2;
     Model711::ENA.fill_registers(registers, offset, model711::Ena::Disabled);
     Model711::N_CTL.fill_registers(registers, offset, N_CTL);
-    Model711::DB_SF.fill_registers(registers, offset, -3);
-    Model711::K_SF.fill_registers(registers, offset, -3);
-    Model711::RSP_TMS_SF.fill_registers(registers, offset, -2);
+    // Deliberately not the scale factors SEP2 fixes its droop values at, so
+    // that anything written here has to be rescaled to land correctly. One of
+    // each direction, so a rescale the wrong way cannot pass.
+    Model711::DB_SF.fill_registers(registers, offset, -2);
+    locations.insert("model711::DB_SF".into(), location(Model711::DB_SF, offset));
+    Model711::K_SF.fill_registers(registers, offset, -4);
+    locations.insert("model711::K_SF".into(), location(Model711::K_SF, offset));
+    Model711::RSP_TMS_SF.fill_registers(registers, offset, 0);
+    locations.insert(
+        "model711::RSP_TMS_SF".into(),
+        location(Model711::RSP_TMS_SF, offset),
+    );
 
     // The first control group is read-only and reports the current settings.
     let ctl_0 = offset + usize::from(Model711::LEN);
@@ -559,13 +586,22 @@ fn fill_ctl_group(registers: &mut [u16], base: usize, read_only: model711::CtlRe
 pub fn add_model_713(
     registers: &mut [u16],
     base_offset: usize,
-    _locations: &mut Locations,
+    locations: &mut Locations,
 ) -> usize {
     registers[base_offset] = Model713::ID;
     registers[base_offset + 1] = Model713::LEN;
 
     let offset = base_offset + 2;
     Model713::SOC.fill_registers(registers, offset, Some(10));
+    locations.insert("model713::SOC".into(), location(Model713::SOC, offset));
+
+    // Deliberately not the -2 SEP2 fixes its percentages at, so that the state
+    // of charge has to be rescaled on the way out.
+    Model713::PCT_SF.fill_registers(registers, offset, Some(-1));
+    locations.insert(
+        "model713::PCT_SF".into(),
+        location(Model713::PCT_SF, offset),
+    );
 
     offset + usize::from(Model713::LEN)
 }

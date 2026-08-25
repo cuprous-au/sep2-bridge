@@ -1658,6 +1658,7 @@ dependencies = [
  "exponential-backoff",
  "git-version",
  "log",
+ "num-traits",
  "proptest",
  "rand 0.10.2",
  "regex",

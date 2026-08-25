@@ -58,26 +58,56 @@ const HREF_DDERC: &str = "/edev/1/derp/1/dderc";
 const HREF_DERCL: &str = "/edev/1/derp/1/derc";
 const HREF_DERC_1: &str = "/edev/1/derp/1/derc/1";
 
-// The values to be mocked and verified. Table numbers from AS5438
-// Table 9
-const DROOP_DB_OF: u32 = 360;
-const DROOP_DB_UF: u32 = 350;
-const DROOP_K_OF: u16 = 50;
-const DROOP_K_UF: u16 = 40;
-const DROOP_OPEN_LOOP_TMS: u16 = 5;
-// Table 10
+// The values to be mocked and verified. Table numbers from AS5438.
+//
+// SEP2 fixes the scale of each value it carries, while the device advertises
+// its own scale factor per group of registers. The mock deliberately uses
+// scale factors that differ from SEP2's (see `add_model_703`, `add_model_704`
+// and `add_model_711` in the mock), so each expectation below is the SEP2 value
+// restated at the device's scale.
+
+// Table 9. frequency droop values are thousandths in SEP2, except for the time
+// which is hundredths of a second.
+const DROOP_DB_OF: u32 = 360; // 0.360 Hz
+const DROOP_DB_UF: u32 = 350; // 0.350 Hz
+const DROOP_K_OF: u16 = 50; // 0.050 per unit
+const DROOP_K_UF: u16 = 40; // 0.040 per unit
+const DROOP_OPEN_LOOP_TMS: u16 = 500; // 5.00 s
+// At the mock's DB_SF of -2, K_SF of -4 and RSP_TMS_SF of 0.
+const EXPECTED_DB_OF: u32 = 36;
+const EXPECTED_DB_UF: u32 = 35;
+const EXPECTED_K_OF: u16 = 500;
+const EXPECTED_K_UF: u16 = 400;
+const EXPECTED_RSP_TMS: u32 = 5;
+
+// Table 10. All SEP2 SFs are hundredths.
 const SET_ES_CONNECT: bool = true;
-const SET_ES_HIGH_VOLT: i16 = 2450;
-const SET_ES_LOW_VOLT: i16 = 2000;
-const SET_ES_HIGH_FREQ: u16 = 5100;
-const SET_ES_LOW_FREQ: u16 = 4900;
-const SET_ES_DELAY: u32 = 300;
-const SET_ES_RANDOM_DELAY: u32 = 60;
-const SET_ES_RAMP_TMS: u32 = 120;
-// Table 11
-const OP_MOD_MAX_LIM_W: u16 = 8000;
-// Table 12
-const OP_MOD_FIXED_W: i16 = -2500;
+const SET_ES_HIGH_VOLT: i16 = 2450; // 24.50%
+const SET_ES_LOW_VOLT: i16 = 2000; // 20.00%
+const SET_ES_HIGH_FREQ: u16 = 5100; // 51.00 Hz
+const SET_ES_LOW_FREQ: u16 = 4900; // 49.00 Hz
+const SET_ES_DELAY: u32 = 30_000; // 300 s
+const SET_ES_RANDOM_DELAY: u32 = 6_000; // 60 s
+const SET_ES_RAMP_TMS: u32 = 12_000; // 120 s
+// At the mock's V_SF of -1 and HZ_SF of -3.
+const EXPECTED_ESV_HI: u16 = 245;
+const EXPECTED_ESV_LO: u16 = 200;
+const EXPECTED_ES_HZ_HI: u32 = 51_000;
+const EXPECTED_ES_HZ_LO: u32 = 49_000;
+// Model 703 has an implicit scale factor of 0 for the times
+const EXPECTED_ES_DLY_TMS: u32 = 300;
+const EXPECTED_ES_RND_TMS: u32 = 60;
+const EXPECTED_ES_RMP_TMS: u32 = 120;
+
+// Table 11. All SEP2 SFs are hundredths.
+const OP_MOD_MAX_LIM_W: u16 = 8000; // 80.00%
+// At the mock's W_MAX_LIM_PCT_SF of 0.
+const EXPECTED_W_MAX_LIM_PCT: u16 = 80;
+
+// Table 12. All SEP2 SFs are hundredths.
+const OP_MOD_FIXED_W: i16 = -2500; // -25.00%
+// At the mock's W_SET_PCT_SF of -1.
+const EXPECTED_W_SET_PCT: i16 = -250;
 
 /// Tests that the DefaultDERControl parameters reach model 703.
 /// (AS5438 - Table 10)
@@ -85,23 +115,13 @@ const OP_MOD_FIXED_W: i16 = -2500;
 async fn applies_as5438_table_10() {
     let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
 
-    assert_register(&mock, "model703::ESV_HI", Some(SET_ES_HIGH_VOLT as u16)).await;
-    assert_register(&mock, "model703::ESV_LO", Some(SET_ES_LOW_VOLT as u16)).await;
-    assert_register(
-        &mock,
-        "model703::ES_HZ_HI",
-        Some(u32::from(SET_ES_HIGH_FREQ)),
-    )
-    .await;
-    assert_register(
-        &mock,
-        "model703::ES_HZ_LO",
-        Some(u32::from(SET_ES_LOW_FREQ)),
-    )
-    .await;
-    assert_register(&mock, "model703::ES_DLY_TMS", Some(SET_ES_DELAY)).await;
-    assert_register(&mock, "model703::ES_RND_TMS", Some(SET_ES_RANDOM_DELAY)).await;
-    assert_register(&mock, "model703::ES_RMP_TMS", Some(SET_ES_RAMP_TMS)).await;
+    assert_register(&mock, "model703::ESV_HI", Some(EXPECTED_ESV_HI)).await;
+    assert_register(&mock, "model703::ESV_LO", Some(EXPECTED_ESV_LO)).await;
+    assert_register(&mock, "model703::ES_HZ_HI", Some(EXPECTED_ES_HZ_HI)).await;
+    assert_register(&mock, "model703::ES_HZ_LO", Some(EXPECTED_ES_HZ_LO)).await;
+    assert_register(&mock, "model703::ES_DLY_TMS", Some(EXPECTED_ES_DLY_TMS)).await;
+    assert_register(&mock, "model703::ES_RND_TMS", Some(EXPECTED_ES_RND_TMS)).await;
+    assert_register(&mock, "model703::ES_RMP_TMS", Some(EXPECTED_ES_RMP_TMS)).await;
 
     // The mock seeds this as Disabled, so this cannot pass vacuously.
     // We manually are doing the conversion from true to the enum, so assert the
@@ -124,7 +144,12 @@ async fn applies_as5438_tables_11_12() {
         Some(model704::WMaxLimPctEna::Enabled),
     )
     .await;
-    assert_register(&mock, "model704::W_MAX_LIM_PCT", Some(OP_MOD_MAX_LIM_W)).await;
+    assert_register(
+        &mock,
+        "model704::W_MAX_LIM_PCT",
+        Some(EXPECTED_W_MAX_LIM_PCT),
+    )
+    .await;
 
     assert_register(
         &mock,
@@ -132,7 +157,7 @@ async fn applies_as5438_tables_11_12() {
         Some(model704::WSetEna::Enabled),
     )
     .await;
-    assert_register(&mock, "model704::W_SET_PCT", Some(OP_MOD_FIXED_W)).await;
+    assert_register(&mock, "model704::W_SET_PCT", Some(EXPECTED_W_SET_PCT)).await;
 }
 
 /// Tests that an active DERControl's opModFreqDroop reaches model 711. The
@@ -143,16 +168,11 @@ async fn applies_as5438_tables_11_12() {
 async fn applies_as5438_table_9() {
     let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
 
-    assert_register(&mock, "model711::CTL_1::DB_OF", DROOP_DB_OF).await;
-    assert_register(&mock, "model711::CTL_1::DB_UF", DROOP_DB_UF).await;
-    assert_register(&mock, "model711::CTL_1::K_OF", DROOP_K_OF).await;
-    assert_register(&mock, "model711::CTL_1::K_UF", DROOP_K_UF).await;
-    assert_register(
-        &mock,
-        "model711::CTL_1::RSP_TMS",
-        u32::from(DROOP_OPEN_LOOP_TMS),
-    )
-    .await;
+    assert_register(&mock, "model711::CTL_1::DB_OF", EXPECTED_DB_OF).await;
+    assert_register(&mock, "model711::CTL_1::DB_UF", EXPECTED_DB_UF).await;
+    assert_register(&mock, "model711::CTL_1::K_OF", EXPECTED_K_OF).await;
+    assert_register(&mock, "model711::CTL_1::K_UF", EXPECTED_K_UF).await;
+    assert_register(&mock, "model711::CTL_1::RSP_TMS", EXPECTED_RSP_TMS).await;
 
     // The read-only group reporting the current settings must not be touched,
     // and the writable group must stay marked writable.
