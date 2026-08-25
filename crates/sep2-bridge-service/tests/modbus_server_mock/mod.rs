@@ -57,6 +57,19 @@ impl SunSpecMock {
         })
     }
 
+    /// Allows the ability to reconfigure the mock with a new model list.
+    pub fn reinit(&mut self, enabled_models: Option<&[u32]>) {
+        let locations = initialise_registers(
+            &mut self
+                .service_data
+                .registers
+                .lock()
+                .expect("Unable to lock registers for reinit"),
+            enabled_models,
+        );
+        self.locations = locations;
+    }
+
     /// Starts the modbus server. If addr is None an arbitrary port will be chosen.
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // I would prefer a unix socket here, but tokio-modbus doesn't support it.

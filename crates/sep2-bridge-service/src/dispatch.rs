@@ -173,6 +173,8 @@ pub async fn sep2_device_state_dispatcher(
                     }
                 }
             }
+            // Nothing to do when a device reconnects.
+            modbus_connection::Event::DeviceConnected(_) => {}
         }
     }
 
