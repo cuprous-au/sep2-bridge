@@ -12,6 +12,7 @@ git clone https://github.com/bsgip/envoy
 ```
 2. Bring its docker compose environment up
 ```
+cd demo
 HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up --build
 ```
 
@@ -21,10 +22,10 @@ should initially set up a set of configuration files for testing:
 1. Initialise the environment to set up keys and OpenSSL (note that OpenSSL is required to be installed!):
 > Be sure to update "<path to envoy/demo/tls-termination/test_certs>"
 ```
-CREDENTIALS_DIRECTORY=<path to envoy/demo/tls-termination/test_certs>
+export CREDENTIALS_DIRECTORY=<path to envoy/demo/tls-termination/test_certs>
 ln -s ${CREDENTIALS_DIRECTORY}/{testdevice1,client}.crt
 ln -s ${CREDENTIALS_DIRECTORY}/{testdevice1,client}.key
-export CA_PATH="${PATH_PREFIX}/testca.crt"
+export CA_PATH="${CREDENTIALS_DIRECTORY}/testca.crt"
 export SEP2_OPENSSL_CIPHER_STRING='ECDHE-ECDSA-AES128-CCM8:@SECLEVEL=0'
 
 cat >/tmp/sep2-openssl.cnf <<EOF
@@ -45,7 +46,11 @@ export OPENSSL_CONF=/tmp/sep2-openssl.cnf
 
 2. Run the sep2-bridge using the certificates that envoy has generated.
 ```
-RUST_LOG=sep2_bridge=info cargo run --bin sep2-bridge -- --server-addr 127.0.0.1:8443 --default-poll-rate 15
+RUST_LOG=sep2_bridge=info \
+cargo run --bin sep2-bridge -- \
+  --server-addr 127.0.0.1:8443 \
+  --default-poll-rate 15 \
+  --modbus-socket=unix:///tmp/a.sock
 ```
 
 What will the test do?
