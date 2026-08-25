@@ -19,7 +19,9 @@ use sep2_common::{
         primitives::{HexBinary160, Int64, Uint32},
         response::DERControlResponse,
         time::Time,
-        types::{MRIDType, PINType, PhaseCode, UomType, UsagePointStatus},
+        types::{
+            MRIDType, PINType, PhaseCode, PowerOfTenMultiplierType, UomType, UsagePointStatus,
+        },
     },
 };
 use std::hash::{Hash, Hasher};
@@ -913,20 +915,26 @@ async fn initialise_reading_mrid_cache(
 /// the meter reading type is incomplete, returns None.
 fn reading_key(reading: &MirrorMeterReading) -> Option<CacheKey> {
     reading.reading_type.as_ref().and_then(|reading_type| {
-        reading_type
-            .uom
-            .as_ref()
-            .map(|uom| CacheKey(*uom, reading_type.phase))
+        reading_type.uom.as_ref().map(|uom| {
+            CacheKey(
+                *uom,
+                reading_type.phase,
+                // Default the power of ten to POTM::None so that there's no
+                // confusion between a None and a Some(None).
+                reading_type.power_of_ten_multiplier.unwrap_or_default(),
+            )
+        })
     })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct CacheKey(UomType, Option<PhaseCode>);
+struct CacheKey(UomType, Option<PhaseCode>, PowerOfTenMultiplierType);
 
 impl Hash for CacheKey {
     /// Manual implementation to extract the integers of the key for hashing.
     fn hash<H: Hasher>(&self, state: &mut H) {
         (self.0 as u8).hash(state);
         (self.1.map(|x| x as u8)).hash(state);
+        (self.2 as i8).hash(state);
     }
 }

@@ -2,13 +2,15 @@ use async_broadcast::Sender as BroadcastSender;
 use derive_more::Display;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use sunspec::{
-    Model,
-    client::{AsyncClient, AsyncDevice, Config},
+    FixedSize, Group, Model, Point, Value,
+    client::{AsyncClient, AsyncDevice, AsyncModbusClient, Config},
     models::{
         model1::Model1,
         model701::{self, Alrm, ConnSt, Model701},
         model702::{CtrlModes, Model702},
         model703::{self, Model703},
+        model704::{self, Model704},
+        model711::{self, Model711},
         model713::Model713,
     },
 };
@@ -40,12 +42,61 @@ pub enum Command {
     UpdateParameters(Parameters),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Parameters {
+    // AS5438 - Table 9
+    pub droop_ctl: Option<Model711Ctl>,
+
+    // AS5438 - Table 10
     pub es: Option<model703::Es>,
-    pub esvhi: Option<u16>,
+    pub esv_hi: Option<u16>,
+    pub esv_lo: Option<u16>,
+    pub es_hz_hi: Option<u32>,
+    pub es_hz_lo: Option<u32>,
+    pub es_dly_tms: Option<u32>,
+    pub es_rnd_tms: Option<u32>,
+    pub es_rmp_tms: Option<u32>,
+
+    // AS5438 - Table 11
+    pub w_max_lim_pct_ena: Option<model704::WMaxLimPctEna>,
+    pub w_max_lim_pct: Option<u16>,
+
+    // AS5438 - Table 12
+    pub w_set_ena: Option<model704::WSetEna>,
+    pub w_set_pct: Option<i16>,
     // TODO: Add the remaining parameters required by AS5438
 }
+
+// Wrap model711::Ctl in a newtype to derive PartialEq and Clone.
+#[derive(Debug)]
+pub struct Model711Ctl(pub model711::Ctl);
+
+impl Clone for Model711Ctl {
+    fn clone(&self) -> Self {
+        Self(model711::Ctl {
+            db_of: self.0.db_of,
+            db_uf: self.0.db_uf,
+            k_of: self.0.k_of,
+            k_uf: self.0.k_uf,
+            rsp_tms: self.0.rsp_tms,
+            p_min: self.0.p_min,
+            read_only: self.0.read_only,
+        })
+    }
+}
+
+impl PartialEq for Model711Ctl {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.db_of == other.0.db_of
+            && self.0.db_uf == other.0.db_uf
+            && self.0.k_of == other.0.k_of
+            && self.0.k_uf == other.0.k_uf
+            && self.0.rsp_tms == other.0.rsp_tms
+            && self.0.p_min == other.0.p_min
+            && self.0.read_only == other.0.read_only
+    }
+}
+impl Eq for Model711Ctl {}
 
 // We ensure the loop wakes regularly to make progress on what it needs to do,
 // e.g. reestablish a connection or perform a poll.
@@ -357,12 +408,19 @@ impl Settings {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Metering {
-    pub active_power: Option<i16>,
-    pub reactive_power: Option<i16>,
+    pub w: Option<i16>,
+    pub wl1: Option<i16>,
+    pub wl2: Option<i16>,
+    pub wl3: Option<i16>,
+    pub w_sf: Option<i16>,
+    pub var: Option<i16>,
+    pub var_sf: Option<i16>,
     pub voltages: Vec<VoltageWithReference>,
-    pub frequency: Option<u32>,
+    pub v_sf: Option<i16>,
+    pub hz: Option<u32>,
+    pub hz_sf: Option<i16>,
 }
 
 #[derive(Clone, Debug)]
@@ -408,10 +466,17 @@ impl Metering {
                 .flatten()
                 .collect();
                 Some(Metering {
-                    active_power: m701.w,
-                    reactive_power: m701.var,
+                    w: m701.w,
+                    wl1: m701.wl1,
+                    wl2: m701.wl2,
+                    wl3: m701.wl3,
+                    w_sf: m701.w_sf,
+                    var: m701.var,
+                    var_sf: m701.var_sf,
                     voltages,
-                    frequency: m701.hz,
+                    v_sf: m701.v_sf,
+                    hz: m701.hz,
+                    hz_sf: m701.hz_sf,
                 })
             }
         }
@@ -439,26 +504,87 @@ async fn send_new_parameters(
     device: &AsyncDevice<TokioModbusContext>,
     parameters: &Parameters,
 ) -> Result<()> {
-    // TODO: Understand the SEP2 and sunspec meaning of None. Is it:
-    // a) value is not provided and should not be communicated, or
-    // b) value is null and should be set to null on the other side.
-    // Currently this function is going with the interpretation of a) in both directions.
-    //
-    // Note: if b) ends up being the interpretation, then it might be better to
-    // implement a write_model for optimal communication rather than sending
-    // each point individually.
-    if parameters.es.is_some() {
-        device
-            .write_point(Model703::ES, parameters.es)
-            .await
-            .map_err(comm_err)?;
+    // This is an ugly utility function to make the rest of the parameters less ugly.
+    // The main point is that we only send the value if it is Some.
+    async fn write_if_some<T: FixedSize, M: Model>(
+        device: &AsyncDevice<TokioModbusContext>,
+        p: Point<M, Option<T>>,
+        value: Option<T>,
+    ) -> Result<()> {
+        match value {
+            None => Ok(()),
+            Some(value) => device.write_point(p, Some(value)).await.map_err(comm_err),
+        }
     }
-    if parameters.esvhi.is_some() {
-        device
-            .write_point(Model703::ESV_HI, parameters.esvhi)
-            .await
-            .map_err(comm_err)?;
+
+    // AS5438 - Table 9
+    if device.models.supported_model_ids().contains(&711)
+        && let Some(droop_ctl) = parameters.droop_ctl.as_ref()
+    {
+        // As per the modbus spec, the first control is readonly and represents
+        // the current state. Make sure the device allows at least one other
+        // control before continuing.
+        let n_ctl = device.read_point(Model711::N_CTL).await.map_err(comm_err)?;
+        if n_ctl >= 2 {
+            // We write into the second Ctl group.
+            let offset = Model711::addr(&device.models).addr + Model711::LEN + model711::Ctl::LEN;
+            // And assign manually
+
+            // FIXME: It would be nice to write all of these registers in one
+            // call. However, we can't write the read_only register itself
+            // so it's not as trivial as encoding the entire struct.
+            write_offset_point(device, offset, model711::Ctl::DB_OF, droop_ctl.0.db_of).await?;
+            write_offset_point(device, offset, model711::Ctl::DB_UF, droop_ctl.0.db_uf).await?;
+            write_offset_point(device, offset, model711::Ctl::K_OF, droop_ctl.0.k_of).await?;
+            write_offset_point(device, offset, model711::Ctl::K_UF, droop_ctl.0.k_uf).await?;
+            write_offset_point(device, offset, model711::Ctl::RSP_TMS, droop_ctl.0.rsp_tms).await?;
+        }
+    }
+
+    // AS5438 - Table 10
+    if device.models.supported_model_ids().contains(&703) {
+        write_if_some(device, Model703::ES, parameters.es).await?;
+        write_if_some(device, Model703::ESV_HI, parameters.esv_hi).await?;
+        write_if_some(device, Model703::ESV_LO, parameters.esv_lo).await?;
+        write_if_some(device, Model703::ES_HZ_HI, parameters.es_hz_hi).await?;
+        write_if_some(device, Model703::ES_HZ_LO, parameters.es_hz_lo).await?;
+        write_if_some(device, Model703::ES_DLY_TMS, parameters.es_dly_tms).await?;
+        write_if_some(device, Model703::ES_RND_TMS, parameters.es_rnd_tms).await?;
+        write_if_some(device, Model703::ES_RMP_TMS, parameters.es_rmp_tms).await?;
+    }
+
+    if device.models.supported_model_ids().contains(&704) {
+        // AS5438 - Table 11
+        write_if_some(
+            device,
+            Model704::W_MAX_LIM_PCT_ENA,
+            parameters.w_max_lim_pct_ena,
+        )
+        .await?;
+        write_if_some(device, Model704::W_MAX_LIM_PCT, parameters.w_max_lim_pct).await?;
+
+        // AS5438 - Table 12
+        write_if_some(device, Model704::W_SET_ENA, parameters.w_set_ena).await?;
+        write_if_some(device, Model704::W_SET_PCT, parameters.w_set_pct).await?;
     }
 
     Ok(())
+}
+
+/// A convenience tool for writing points that are part of repeating groups.
+/// Requires the absolute register address for the start of the group and a
+/// point within the group.
+async fn write_offset_point<G: Group, T: Value>(
+    device: &AsyncDevice<TokioModbusContext>,
+    offset: u16,
+    p: Point<G, T>,
+    value: T,
+) -> Result<()> {
+    let addr = offset + p.offset;
+    let words = value.encode();
+    device
+        .client
+        .write_registers(device.slave_id, addr, &words)
+        .await
+        .map_err(comm_err)
 }

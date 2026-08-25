@@ -1,3 +1,6 @@
+// This is a helper module shared by multiple tests
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::future::ready;
 use std::net::SocketAddr;
@@ -8,6 +11,8 @@ use sunspec::models::model103::Model103;
 use sunspec::models::model701::{self, Model701};
 use sunspec::models::model702::Model702;
 use sunspec::models::model703::{self, Model703};
+use sunspec::models::model704::{self, Model704};
+use sunspec::models::model711::{self, Model711};
 use sunspec::models::model713::Model713;
 use sunspec::{Group, Model, Point, Value};
 
@@ -36,7 +41,7 @@ impl SunSpecMock {
         enabled_models: Option<&[u32]>,
     ) -> Result<SunSpecMock, Box<dyn std::error::Error>> {
         // Initialise the internal state
-        let mut registers = vec![0u16; 40500];
+        let mut registers = vec![0u16; 41000];
         let locations = initialise_registers(&mut registers, enabled_models);
 
         // Mutex these states for the service.
@@ -214,8 +219,8 @@ impl tokio_modbus::server::Service for SunSpecService {
 trait PointWrite<U> {
     fn fill_registers(&self, registers: &mut [u16], base: usize, value: U) -> usize;
 }
-impl<T: Model, U: Value> PointWrite<U> for Point<T, U> {
-    fn fill_registers(self: &Point<T, U>, registers: &mut [u16], base: usize, value: U) -> usize {
+impl<G: Group, U: Value> PointWrite<U> for Point<G, U> {
+    fn fill_registers(self: &Point<G, U>, registers: &mut [u16], base: usize, value: U) -> usize {
         let start = base + (self.offset as usize);
         let value_end = start + (self.length as usize);
         let words = value.encode();
@@ -227,7 +232,7 @@ impl<T: Model, U: Value> PointWrite<U> for Point<T, U> {
 }
 
 type Locations = HashMap<String, (usize, usize)>;
-fn location<T: Model, U: Value>(point: Point<T, U>, base: usize) -> (usize, usize) {
+fn location<G: Group, U: Value>(point: Point<G, U>, base: usize) -> (usize, usize) {
     (base + usize::from(point.offset), usize::from(point.length))
 }
 
@@ -254,6 +259,12 @@ fn initialise_registers(registers: &mut [u16], enabled_models: Option<&[u32]>) -
         }
         if enabled_models.is_none_or(|v| v.contains(&703)) {
             offset = add_model_703(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&704)) {
+            offset = add_model_704(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&711)) {
+            offset = add_model_711(registers, offset, &mut locations);
         }
         if enabled_models.is_none_or(|v| v.contains(&713)) {
             offset = add_model_713(registers, offset, &mut locations);
@@ -380,7 +391,169 @@ pub fn add_model_703(
         "model703::ESV_HI".into(),
         location(Model703::ESV_HI, offset),
     );
+    Model703::ESV_LO.fill_registers(registers, offset, Some(43));
+    locations.insert(
+        "model703::ESV_LO".into(),
+        location(Model703::ESV_LO, offset),
+    );
+    Model703::ES_HZ_HI.fill_registers(registers, offset, Some(44));
+    locations.insert(
+        "model703::ES_HZ_HI".into(),
+        location(Model703::ES_HZ_HI, offset),
+    );
+    Model703::ES_HZ_LO.fill_registers(registers, offset, Some(45));
+    locations.insert(
+        "model703::ES_HZ_LO".into(),
+        location(Model703::ES_HZ_LO, offset),
+    );
+    Model703::ES_DLY_TMS.fill_registers(registers, offset, Some(46));
+    locations.insert(
+        "model703::ES_DLY_TMS".into(),
+        location(Model703::ES_DLY_TMS, offset),
+    );
+    Model703::ES_RND_TMS.fill_registers(registers, offset, Some(47));
+    locations.insert(
+        "model703::ES_RND_TMS".into(),
+        location(Model703::ES_RND_TMS, offset),
+    );
+    Model703::ES_RMP_TMS.fill_registers(registers, offset, Some(48));
+    locations.insert(
+        "model703::ES_RMP_TMS".into(),
+        location(Model703::ES_RMP_TMS, offset),
+    );
     offset + usize::from(Model703::LEN)
+}
+
+/// Appends Model 704 (DER AC Controls)
+///
+/// The model contains four nested (non-repeating) groups after its fixed part,
+/// so the declared length covers those too.
+pub fn add_model_704(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    let length = Model704::LEN
+        + model704::PfwInj::LEN
+        + model704::PfwInjRvrt::LEN
+        + model704::PfwAbs::LEN
+        + model704::PfwAbsRvrt::LEN;
+
+    registers[base_offset] = Model704::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+
+    // AS5438 - Table 11
+    Model704::W_MAX_LIM_PCT_ENA.fill_registers(
+        registers,
+        offset,
+        Some(model704::WMaxLimPctEna::Disabled),
+    );
+    locations.insert(
+        "model704::W_MAX_LIM_PCT_ENA".into(),
+        location(Model704::W_MAX_LIM_PCT_ENA, offset),
+    );
+    Model704::W_MAX_LIM_PCT.fill_registers(registers, offset, Some(0));
+    locations.insert(
+        "model704::W_MAX_LIM_PCT".into(),
+        location(Model704::W_MAX_LIM_PCT, offset),
+    );
+    Model704::W_MAX_LIM_PCT_SF.fill_registers(registers, offset, Some(-2));
+
+    // AS5438 - Table 12
+    Model704::W_SET_ENA.fill_registers(registers, offset, Some(model704::WSetEna::Disabled));
+    locations.insert(
+        "model704::W_SET_ENA".into(),
+        location(Model704::W_SET_ENA, offset),
+    );
+    Model704::W_SET_PCT.fill_registers(registers, offset, Some(0));
+    locations.insert(
+        "model704::W_SET_PCT".into(),
+        location(Model704::W_SET_PCT, offset),
+    );
+    Model704::W_SET_PCT_SF.fill_registers(registers, offset, Some(-2));
+
+    offset + usize::from(length)
+}
+
+/// Appends Model 711 (DER Frequency Droop)
+///
+/// The model has a repeating `Ctl` group; we provide two of them as the first
+/// is read-only by the SunSpec spec and represents the current settings. The
+/// second group's points are exposed as locations, as that is where the bridge
+/// writes, along with one point of the first group so tests can check it is
+/// left alone.
+pub fn add_model_711(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    const N_CTL: u16 = 2;
+    let length = Model711::LEN + N_CTL * model711::Ctl::LEN;
+
+    registers[base_offset] = Model711::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+    Model711::ENA.fill_registers(registers, offset, model711::Ena::Disabled);
+    Model711::N_CTL.fill_registers(registers, offset, N_CTL);
+    Model711::DB_SF.fill_registers(registers, offset, -3);
+    Model711::K_SF.fill_registers(registers, offset, -3);
+    Model711::RSP_TMS_SF.fill_registers(registers, offset, -2);
+
+    // The first control group is read-only and reports the current settings.
+    let ctl_0 = offset + usize::from(Model711::LEN);
+    fill_ctl_group(registers, ctl_0, model711::CtlReadOnly::R);
+
+    // The second control group is the writable one.
+    let ctl_1 = ctl_0 + usize::from(model711::Ctl::LEN);
+    fill_ctl_group(registers, ctl_1, model711::CtlReadOnly::Rw);
+    for (name, point_location) in [
+        (
+            "model711::CTL_1::DB_OF",
+            location(model711::Ctl::DB_OF, ctl_1),
+        ),
+        (
+            "model711::CTL_1::DB_UF",
+            location(model711::Ctl::DB_UF, ctl_1),
+        ),
+        (
+            "model711::CTL_1::K_OF",
+            location(model711::Ctl::K_OF, ctl_1),
+        ),
+        (
+            "model711::CTL_1::K_UF",
+            location(model711::Ctl::K_UF, ctl_1),
+        ),
+        (
+            "model711::CTL_1::RSP_TMS",
+            location(model711::Ctl::RSP_TMS, ctl_1),
+        ),
+        (
+            "model711::CTL_1::READ_ONLY",
+            location(model711::Ctl::READ_ONLY, ctl_1),
+        ),
+        (
+            "model711::CTL_0::DB_OF",
+            location(model711::Ctl::DB_OF, ctl_0),
+        ),
+    ] {
+        locations.insert(name.into(), point_location);
+    }
+
+    offset + usize::from(length)
+}
+
+/// Fills a single model 711 `Ctl` group with zeroed control values.
+fn fill_ctl_group(registers: &mut [u16], base: usize, read_only: model711::CtlReadOnly) {
+    model711::Ctl::DB_OF.fill_registers(registers, base, 0);
+    model711::Ctl::DB_UF.fill_registers(registers, base, 0);
+    model711::Ctl::K_OF.fill_registers(registers, base, 0);
+    model711::Ctl::K_UF.fill_registers(registers, base, 0);
+    model711::Ctl::RSP_TMS.fill_registers(registers, base, 0);
+    model711::Ctl::P_MIN.fill_registers(registers, base, None);
+    model711::Ctl::READ_ONLY.fill_registers(registers, base, read_only);
 }
 
 pub fn add_model_713(

@@ -27,7 +27,7 @@ async fn sends_parameters_to_device() {
         .send(modbus_connection::Command::UpdateParameters(
             modbus_connection::Parameters {
                 es: Some(model703::Es::Enabled),
-                esvhi: None,
+                ..Default::default()
             },
         ))
         .await
@@ -78,9 +78,9 @@ async fn reads_device_state() {
                     esv_hi
                 }),
                 Some(Metering {
-                    active_power, ..
+                    w, ..
                 }),
-            ) if esv_hi == &expected_esv_hi && st == &expected_st && active_power == &expected_w
+            ) if esv_hi == &expected_esv_hi && st == &expected_st && w == &expected_w
             ))
     );
 }
@@ -185,7 +185,7 @@ async fn tolerates_missing_control_parameters() {
         .send(modbus_connection::Command::UpdateParameters(
             modbus_connection::Parameters {
                 es: Some(model703::Es::Enabled),
-                esvhi: None,
+                ..Default::default()
             },
         ))
         .await
