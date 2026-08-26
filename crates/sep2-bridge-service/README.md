@@ -77,7 +77,7 @@ curl -X POST -i --user admin:password \
   http://127.0.0.1:8001/site_group \
   --json '{
   "name": "test_group",
-  "default_group": true
+  "default_group": false
 }'
 
 # You should see a 201 response with location `/site_group/test_group`
@@ -91,7 +91,6 @@ curl -X POST -i --user admin:password \
 To then apply a control to the default control group, that will take immediate
 effect for the next 5 minutes, you can send:
 ```
-
 NOW=$(date --utc '+%Y-%m-%dT%H:%M:%SZ')
 
 curl -X POST -i --user admin:password \
