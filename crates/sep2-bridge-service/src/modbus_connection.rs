@@ -21,6 +21,8 @@ use tokio::{
 };
 use tokio_modbus::client::{self, Client, Context};
 
+use crate::{ScaledValue, ScaledValueInner};
+
 #[derive(Clone, Debug, Display)]
 pub enum Error {
     ConnectionFailed,
@@ -44,59 +46,37 @@ pub enum Command {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Parameters {
-    // AS5438 - Table 9
+    // AS5438 - Table E.9, Section E.4.7
     pub droop_ctl: Option<Model711Ctl>,
 
-    // AS5438 - Table 10
+    // AS5438 - Table E.10, Section E.4.8
     pub es: Option<model703::Es>,
-    pub esv_hi: Option<u16>,
-    pub esv_lo: Option<u16>,
-    pub es_hz_hi: Option<u32>,
-    pub es_hz_lo: Option<u32>,
+    pub esv_hi: Option<ScaledValue<u16>>,
+    pub esv_lo: Option<ScaledValue<u16>>,
+    pub es_hz_hi: Option<ScaledValue<u32>>,
+    pub es_hz_lo: Option<ScaledValue<u32>>,
     pub es_dly_tms: Option<u32>,
     pub es_rnd_tms: Option<u32>,
     pub es_rmp_tms: Option<u32>,
 
-    // AS5438 - Table 11
+    // AS5438 - Table 11, Section E.4.9
     pub w_max_lim_pct_ena: Option<model704::WMaxLimPctEna>,
-    pub w_max_lim_pct: Option<u16>,
+    pub w_max_lim_pct: Option<ScaledValue<u16>>,
 
-    // AS5438 - Table 12
+    // AS5438 - Table 12, Section E.4.10
     pub w_set_ena: Option<model704::WSetEna>,
-    pub w_set_pct: Option<i16>,
+    pub w_set_pct: Option<ScaledValue<i16>>,
     // TODO: Add the remaining parameters required by AS5438
 }
 
-// Wrap model711::Ctl in a newtype to derive PartialEq and Clone.
-#[derive(Debug)]
-pub struct Model711Ctl(pub model711::Ctl);
-
-impl Clone for Model711Ctl {
-    fn clone(&self) -> Self {
-        Self(model711::Ctl {
-            db_of: self.0.db_of,
-            db_uf: self.0.db_uf,
-            k_of: self.0.k_of,
-            k_uf: self.0.k_uf,
-            rsp_tms: self.0.rsp_tms,
-            p_min: self.0.p_min,
-            read_only: self.0.read_only,
-        })
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Model711Ctl {
+    pub db_of: ScaledValue<u32>,
+    pub db_uf: ScaledValue<u32>,
+    pub k_of: ScaledValue<u16>,
+    pub k_uf: ScaledValue<u16>,
+    pub rsp_tms: ScaledValue<u32>,
 }
-
-impl PartialEq for Model711Ctl {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.db_of == other.0.db_of
-            && self.0.db_uf == other.0.db_uf
-            && self.0.k_of == other.0.k_of
-            && self.0.k_uf == other.0.k_uf
-            && self.0.rsp_tms == other.0.rsp_tms
-            && self.0.p_min == other.0.p_min
-            && self.0.read_only == other.0.read_only
-    }
-}
-impl Eq for Model711Ctl {}
 
 // We ensure the loop wakes regularly to make progress on what it needs to do,
 // e.g. reestablish a connection or perform a poll.
@@ -184,7 +164,7 @@ pub async fn task(
                     drop_connection(device_opt.take(), err).await;
                 }
                 Ok(Ok(_)) => {
-                    log::trace!("Sent new parameters");
+                    log::trace!("Sent new parameters: {:?}", parameters);
                     last_sent_parameters = Some(parameters.clone());
                 }
             }
@@ -374,7 +354,7 @@ pub struct Status {
     pub st: Option<model701::St>,
     pub conn_st: Option<ConnSt>,
     pub alrm: Option<Alrm>,
-    pub soc: Option<u16>,
+    pub soc: Option<ScaledValue<u16>>,
 }
 
 impl Status {
@@ -389,21 +369,28 @@ impl Status {
             st: m701.and_then(|m701| m701.st),
             conn_st: m701.and_then(|m701| m701.conn_st),
             alrm: m701.and_then(|m701| m701.alrm),
-            soc: m713.and_then(|m713| m713.soc),
+            // Extract SoC with scale factor
+            soc: m713.and_then(|m713| {
+                m713.soc
+                    .map(|soc| ScaledValue::new(soc, m713.pct_sf.unwrap_or_default()))
+            }),
         })
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Settings {
-    pub esv_hi: Option<u16>,
+    pub esv_hi: Option<ScaledValue<u16>>,
     // TODO: Add the remaining settings required by AS5438
 }
 
 impl Settings {
     fn from(m703: &Option<Model703>) -> Option<Self> {
         m703.as_ref().map(|m703| Settings {
-            esv_hi: m703.esv_hi,
+            // Extract the voltage with its scale factor.
+            esv_hi: m703
+                .esv_hi
+                .map(|esv_hi| ScaledValue::new(esv_hi, m703.v_sf.unwrap_or_default())),
         })
     }
 }
@@ -516,8 +503,22 @@ async fn send_new_parameters(
             Some(value) => device.write_point(p, Some(value)).await.map_err(comm_err),
         }
     }
+    // As above but with a ScaledValue and a target scale factor.
+    async fn write_rescaled_if_some<T: FixedSize + ScaledValueInner, M: Model>(
+        device: &AsyncDevice<TokioModbusContext>,
+        p: Point<M, Option<T>>,
+        value: Option<ScaledValue<T>>,
+        scale_factor: i16,
+    ) -> Result<()> {
+        write_if_some(
+            device,
+            p,
+            value.map(|inner| inner.rescale(scale_factor).value),
+        )
+        .await
+    }
 
-    // AS5438 - Table 9
+    // AS5438 - Table E.9, Section E.4.7
     if device.models.supported_model_ids().contains(&711)
         && let Some(droop_ctl) = parameters.droop_ctl.as_ref()
     {
@@ -528,44 +529,116 @@ async fn send_new_parameters(
         if n_ctl >= 2 {
             // We write into the second Ctl group.
             let offset = Model711::addr(&device.models).addr + Model711::LEN + model711::Ctl::LEN;
+
+            let db_sf = device.read_point(Model711::DB_SF).await.map_err(comm_err)?;
+            let k_sf = device.read_point(Model711::K_SF).await.map_err(comm_err)?;
+            let rsp_tms_sf = device
+                .read_point(Model711::RSP_TMS_SF)
+                .await
+                .map_err(comm_err)?;
             // And assign manually
 
             // FIXME: It would be nice to write all of these registers in one
             // call. However, we can't write the read_only register itself
             // so it's not as trivial as encoding the entire struct.
-            write_offset_point(device, offset, model711::Ctl::DB_OF, droop_ctl.0.db_of).await?;
-            write_offset_point(device, offset, model711::Ctl::DB_UF, droop_ctl.0.db_uf).await?;
-            write_offset_point(device, offset, model711::Ctl::K_OF, droop_ctl.0.k_of).await?;
-            write_offset_point(device, offset, model711::Ctl::K_UF, droop_ctl.0.k_uf).await?;
-            write_offset_point(device, offset, model711::Ctl::RSP_TMS, droop_ctl.0.rsp_tms).await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::DB_OF,
+                droop_ctl.db_of.rescale(db_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::DB_UF,
+                droop_ctl.db_uf.rescale(db_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::K_OF,
+                droop_ctl.k_of.rescale(k_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::K_UF,
+                droop_ctl.k_uf.rescale(k_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::RSP_TMS,
+                droop_ctl.rsp_tms.rescale(rsp_tms_sf).value,
+            )
+            .await?;
         }
     }
 
-    // AS5438 - Table 10
+    // AS5438 - Table E.10, Section E.4.8
     if device.models.supported_model_ids().contains(&703) {
         write_if_some(device, Model703::ES, parameters.es).await?;
-        write_if_some(device, Model703::ESV_HI, parameters.esv_hi).await?;
-        write_if_some(device, Model703::ESV_LO, parameters.esv_lo).await?;
-        write_if_some(device, Model703::ES_HZ_HI, parameters.es_hz_hi).await?;
-        write_if_some(device, Model703::ES_HZ_LO, parameters.es_hz_lo).await?;
+        if parameters.esv_hi.is_some() || parameters.esv_lo.is_some() {
+            let v_sf = device
+                .read_point(Model703::V_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default();
+            write_rescaled_if_some(device, Model703::ESV_HI, parameters.esv_hi, v_sf).await?;
+            write_rescaled_if_some(device, Model703::ESV_LO, parameters.esv_lo, v_sf).await?;
+        }
+        if parameters.es_hz_hi.is_some() || parameters.es_hz_lo.is_some() {
+            let hz_sf = device
+                .read_point(Model703::HZ_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default();
+            write_rescaled_if_some(device, Model703::ES_HZ_HI, parameters.es_hz_hi, hz_sf).await?;
+            write_rescaled_if_some(device, Model703::ES_HZ_LO, parameters.es_hz_lo, hz_sf).await?;
+        }
         write_if_some(device, Model703::ES_DLY_TMS, parameters.es_dly_tms).await?;
         write_if_some(device, Model703::ES_RND_TMS, parameters.es_rnd_tms).await?;
         write_if_some(device, Model703::ES_RMP_TMS, parameters.es_rmp_tms).await?;
     }
 
     if device.models.supported_model_ids().contains(&704) {
-        // AS5438 - Table 11
+        // AS5438 - Table E.11, Section E.4.9
         write_if_some(
             device,
             Model704::W_MAX_LIM_PCT_ENA,
             parameters.w_max_lim_pct_ena,
         )
         .await?;
-        write_if_some(device, Model704::W_MAX_LIM_PCT, parameters.w_max_lim_pct).await?;
+        if parameters.w_max_lim_pct.is_some() {
+            let pct_sf = device
+                .read_point(Model704::W_MAX_LIM_PCT_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default();
+            write_rescaled_if_some(
+                device,
+                Model704::W_MAX_LIM_PCT,
+                parameters.w_max_lim_pct,
+                pct_sf,
+            )
+            .await?;
+        }
 
-        // AS5438 - Table 12
+        // AS5438 - Table E.12, Section E.4.10
         write_if_some(device, Model704::W_SET_ENA, parameters.w_set_ena).await?;
-        write_if_some(device, Model704::W_SET_PCT, parameters.w_set_pct).await?;
+        if parameters.w_set_pct.is_some() {
+            let pct_sf = device
+                .read_point(Model704::W_SET_PCT_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default();
+            write_rescaled_if_some(device, Model704::W_SET_PCT, parameters.w_set_pct, pct_sf)
+                .await?;
+        }
     }
 
     Ok(())

@@ -12,6 +12,7 @@ env_logger.workspace = true
 exponential-backoff.workspace = true
 git-version.workspace = true
 log.workspace = true
+num-traits.workspace = true
 rand.workspace = true
 sep2_client = { workspace = true, features = ["all"] }
 sep2_common = { workspace = true, features = ["all"] }
