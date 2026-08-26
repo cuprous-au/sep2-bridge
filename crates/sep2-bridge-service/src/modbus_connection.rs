@@ -107,6 +107,7 @@ pub async fn task(
     device_id: u8,
 ) -> crate::Result<()> {
     let mut device_opt: Option<AsyncDevice<TokioModbusContext>> = None;
+    let mut der_kind = None;
     let mut parameters = None;
     let mut last_sent_parameters = None;
     let mut last_poll_time = Instant::now();
@@ -136,12 +137,22 @@ pub async fn task(
                 }
                 Ok(Ok((new_device, capabilities))) => {
                     device_opt = Some(new_device);
+
                     if let Some(capabilities) = capabilities {
                         log::trace!("Broadcasting CapabilitiesPolled");
                         output_ch
-                            .broadcast(Event::CapabilitiesPolled(capabilities))
+                            .broadcast(Event::CapabilitiesPolled(capabilities.clone()))
                             .await
                             .map_err(|_| crate::Error::ChannelClosed)?;
+                        der_kind = capabilities.der_kind();
+                        match der_kind {
+                            Some(der_kind) => log::debug!("Device classified as {:?}", der_kind),
+                            None => log::warn!(
+                                "Device reports no model 702 charge or discharge ratings, so we \
+                                cannot tell whether it is generation or storage. Its connection \
+                                status will not be reported to the SEP2 server."
+                            ),
+                        }
                     }
                     // As the device may have been restarted, we reset our last
                     // sent parameters to indicate we don't know what the device
@@ -175,7 +186,7 @@ pub async fn task(
             && let Some(device) = &device_opt
         {
             log::trace!("Polling device state");
-            match time::timeout(COMM_TIMEOUT, poll_device_state(device)).await {
+            match time::timeout(COMM_TIMEOUT, poll_device_state(device, der_kind)).await {
                 Err(_) => {
                     drop_connection(device_opt.take(), Error::CommunicationTimeout).await;
                 }
@@ -310,7 +321,9 @@ pub struct Capabilities {
     pub var_max_inj_rtg: Option<u16>,
     pub var_max_abs_rtg: Option<u16>,
     pub w_cha_rte_max_rtg: Option<u16>,
+    pub w_dis_cha_rte_max_rtg: Option<u16>,
     pub va_cha_rte_max_rtg: Option<u16>,
+    pub va_dis_cha_rte_max_rtg: Option<u16>,
     pub v_nom_rtg: Option<u16>,
     pub v_max_rtg: Option<u16>,
     pub v_min_rtg: Option<u16>,
@@ -330,7 +343,9 @@ impl From<Model702> for Capabilities {
             var_max_inj_rtg: m702.var_max_inj_rtg,
             var_max_abs_rtg: m702.var_max_abs_rtg,
             w_cha_rte_max_rtg: m702.w_cha_rte_max_rtg,
+            w_dis_cha_rte_max_rtg: m702.w_dis_cha_rte_max_rtg,
             va_cha_rte_max_rtg: m702.va_cha_rte_max_rtg,
+            va_dis_cha_rte_max_rtg: m702.va_dis_cha_rte_max_rtg,
             v_nom_rtg: m702.v_nom_rtg,
             v_max_rtg: m702.v_max_rtg,
             v_min_rtg: m702.v_min_rtg,
@@ -339,6 +354,44 @@ impl From<Model702> for Capabilities {
         }
     }
 }
+
+/// Whether the device generates, stores, or both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DerKind {
+    pub generation: bool,
+    pub storage: bool,
+}
+
+impl Capabilities {
+    /// Taking a guess at the kind of device based on whether it can
+    /// charge/discharge. This is a very limited guess and may be extended in
+    /// future.
+    pub fn der_kind(&self) -> Option<DerKind> {
+        let ratings = [
+            self.w_cha_rte_max_rtg,
+            self.w_dis_cha_rte_max_rtg,
+            self.va_cha_rte_max_rtg,
+            self.va_dis_cha_rte_max_rtg,
+        ];
+
+        // A device that implemented none of these ratings has told us nothing.
+        if !ratings.iter().any(Option::is_some) {
+            return None;
+        }
+
+        // Otherwise if any of them are non-zero then it must be storage.
+        let storage = ratings.iter().flatten().any(|rating| *rating > 0);
+        // We assume a device is either generation or storage. This is a
+        // limitation that may have to be removed in the future.
+        let generation = !storage;
+
+        Some(DerKind {
+            generation,
+            storage,
+        })
+    }
+}
+
 async fn capabilities_query(
     device: &AsyncDevice<TokioModbusContext>,
 ) -> Result<Option<Capabilities>> {
@@ -355,10 +408,15 @@ pub struct Status {
     pub conn_st: Option<ConnSt>,
     pub alrm: Option<Alrm>,
     pub soc: Option<ScaledValue<u16>>,
+    pub der_kind: Option<DerKind>,
 }
 
 impl Status {
-    fn from(m701: &Option<Model701>, m713: &Option<Model713>) -> Option<Self> {
+    fn from(
+        m701: &Option<Model701>,
+        m713: &Option<Model713>,
+        der_kind: Option<DerKind>,
+    ) -> Option<Self> {
         if m701.is_none() && m713.is_none() {
             return None;
         }
@@ -369,6 +427,7 @@ impl Status {
             st: m701.and_then(|m701| m701.st),
             conn_st: m701.and_then(|m701| m701.conn_st),
             alrm: m701.and_then(|m701| m701.alrm),
+            der_kind,
             // Extract SoC with scale factor
             soc: m713.and_then(|m713| {
                 m713.soc
@@ -472,13 +531,14 @@ impl Metering {
 
 async fn poll_device_state(
     device: &AsyncDevice<TokioModbusContext>,
+    der_kind: Option<DerKind>,
 ) -> Result<(Option<Status>, Option<Settings>, Option<Metering>)> {
     let m701 = read_model_safe::<Model701>(device).await?;
     let m703 = read_model_safe::<Model703>(device).await?;
     let m713 = read_model_safe::<Model713>(device).await?;
 
     Ok((
-        Status::from(&m701, &m713),
+        Status::from(&m701, &m713, der_kind),
         Settings::from(&m703),
         Metering::from(&m701),
     ))

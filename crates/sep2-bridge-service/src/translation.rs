@@ -5,7 +5,7 @@ use derive_more::Display;
 use sep2_common::packages::{
     der::{
         ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
-        DERCapability, DERControlType, DERSettings, DERStatus, FreqDroopType,
+        DERCapability, DERControlType, DERSettings, DERStatus, DERType, FreqDroopType,
         OperationalModeStatusType, OperationalModeStatusValue, PowerFactor, ReactivePower,
         ReactiveSusceptance, StateOfChargeStatusType, VoltageRMS,
     },
@@ -23,7 +23,7 @@ use sunspec::models::{model701, model702::CtrlModes, model703, model704};
 use crate::{
     ScaledValue,
     modbus_connection::{
-        Capabilities as ModbusCapabilities, Metering as ModbusMetering, Model711Ctl,
+        Capabilities as ModbusCapabilities, DerKind, Metering as ModbusMetering, Model711Ctl,
         Parameters as ModbusParameters, PhaseReference, Settings as ModbusSettings,
         Status as ModbusStatus, VoltageWithReference,
     },
@@ -84,6 +84,7 @@ pub trait TryConvert<T> {
 impl TryConvert<DERCapability> for ModbusCapabilities {
     fn try_convert(self: ModbusCapabilities) -> Result<DERCapability> {
         Ok(DERCapability {
+            _type: self.der_kind().convert(),
             rtg_max_w: self
                 .w_max_rtg
                 .try_convert_mandatory()
@@ -112,6 +113,11 @@ impl TryConvert<DERCapability> for ModbusCapabilities {
                 .try_convert()
                 .map_err(|err| err.name("w_cha_rte_max_rtg"))?,
             rtg_max_charge_rate_va: self.va_cha_rte_max_rtg.convert(),
+            rtg_max_discharge_rate_w: self
+                .w_dis_cha_rte_max_rtg
+                .try_convert()
+                .map_err(|err| err.name("w_dis_cha_rte_max_rtg"))?,
+            rtg_max_discharge_rate_va: self.va_dis_cha_rte_max_rtg.convert(),
             rtg_v_nom: self.v_nom_rtg.convert(),
             rtg_max_v: self.v_max_rtg.convert(),
             rtg_min_v: self.v_min_rtg.convert(),
@@ -127,17 +133,36 @@ impl TryConvert<DERCapability> for ModbusCapabilities {
 
 impl TryConvert<DERStatus> for ModbusStatus {
     fn try_convert(self: ModbusStatus) -> Result<DERStatus> {
-        // TODO: Work out how to translate conn_st, should it be gen_connect_status or stor_connect_status?
-        if self.conn_st.is_some() {
-            return Err(Error::Unknown.name("conn_st"));
-        }
+        // Sunspec only reports a single connection status. SEP2 has both
+        // generation/storage connection statuses. We use the der_kind to
+        // distinguish between these.
+        let connect_status = self
+            .conn_st
+            .try_convert()
+            .map_err(|err| err.name("conn_st"))?;
+
+        let (gen_connect_status, stor_connect_status) = match (connect_status, self.der_kind) {
+            (None, _) => (None, None),
+            (_, None) => (None, None),
+            (
+                Some(connect_status),
+                Some(DerKind {
+                    generation,
+                    storage,
+                }),
+            ) => (
+                generation.then_some(connect_status.clone()),
+                storage.then_some(connect_status),
+            ),
+        };
+
         Ok(DERStatus {
             operational_mode_status: self
                 .st
                 .try_convert()
                 .map_err(|err| err.name("operational_mode_status"))?,
-            gen_connect_status: None,
-            stor_connect_status: None,
+            gen_connect_status,
+            stor_connect_status,
             alarm_status: self
                 .alrm
                 .try_convert()
@@ -499,16 +524,37 @@ impl TryConvertUnnamed<OperationalModeStatusType> for model701::St {
     }
 }
 
+impl Convert<DERType> for Option<DerKind> {
+    fn convert(self: Option<DerKind>) -> DERType {
+        match self {
+            Some(DerKind {
+                generation: true,
+                storage: true,
+            }) => DERType::CombinedPVAndStorage,
+            Some(DerKind {
+                generation: true,
+                storage: false,
+            }) => DERType::OtherGeneration,
+            Some(DerKind {
+                generation: false,
+                storage: true,
+            }) => DERType::OtherStorage,
+            Some(DerKind {
+                generation: false,
+                storage: false,
+            }) => DERType::Unknown,
+            None => DERType::Unknown,
+        }
+    }
+}
+
 impl TryConvertUnnamed<ConnectStatusType> for model701::ConnSt {
     fn try_convert(self: model701::ConnSt) -> ResultUnnamed<ConnectStatusType> {
         Ok(ConnectStatusType {
             date_time: Int64(Utc::now().timestamp()),
             value: match self {
                 model701::ConnSt::Disconnected => ConnectStatusValue::empty(),
-                model701::ConnSt::Connected => {
-                    // TODO: Figure out what we say exactly here
-                    Err(Error::Unknown)?
-                }
+                model701::ConnSt::Connected => ConnectStatusValue::Connected,
                 model701::ConnSt::Invalid(_) => Err(Error::UnmappableInvalid)?,
             },
         })
@@ -756,6 +802,7 @@ mod tests {
             conn_st: None,
             alrm: None,
             soc: None,
+            der_kind: None,
         };
 
         let result: Result<DERStatus> = status.try_convert();
@@ -793,14 +840,38 @@ mod tests {
     fn status() {
         let status = ModbusStatus {
             st: Some(model701::St::On),
-            // TODO: once this is translatable, add a value back in.
-            conn_st: None,
+            conn_st: Some(model701::ConnSt::Connected),
             alrm: Some(model701::Alrm::AcOverVolt),
             soc: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
+            der_kind: Some(DerKind {
+                generation: true,
+                storage: false,
+            }),
         };
 
         let result: Result<DERStatus> = status.try_convert();
         assert!(result.is_ok());
+    }
+
+    /// An unclassified device should lose only its connection status, not the
+    /// whole of its DERStatus.
+    #[test]
+    fn unknown_der_kind_drops_only_connect_status() {
+        let status = ModbusStatus {
+            st: Some(model701::St::On),
+            conn_st: Some(model701::ConnSt::Connected),
+            alrm: Some(model701::Alrm::AcOverVolt),
+            soc: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
+            der_kind: None,
+        };
+
+        let result: DERStatus = status.try_convert().expect("Translation failed");
+
+        assert!(result.gen_connect_status.is_none());
+        assert!(result.stor_connect_status.is_none());
+        assert!(result.operational_mode_status.is_some());
+        assert!(result.alarm_status.is_some());
+        assert!(result.state_of_charge_status.is_some());
     }
 
     /// SEP2 fixes the state of charge at hundredths of a percent, so whatever
@@ -841,7 +912,9 @@ mod tests {
             var_max_inj_rtg: Some(46),
             var_max_abs_rtg: Some(47),
             w_cha_rte_max_rtg: Some(48),
+            w_dis_cha_rte_max_rtg: Some(54),
             va_cha_rte_max_rtg: Some(49),
+            va_dis_cha_rte_max_rtg: Some(55),
             v_nom_rtg: Some(50),
             v_max_rtg: Some(51),
             v_min_rtg: Some(52),

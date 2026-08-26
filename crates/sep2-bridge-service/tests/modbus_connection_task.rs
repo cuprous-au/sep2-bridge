@@ -5,7 +5,9 @@ use std::time::Duration;
 use modbus_server_mock::SunSpecMock;
 use sep2_bridge::{
     Result, ScaledValue,
-    modbus_connection::{self, Capabilities, Metering, Model711Ctl, Settings, Status, Transport},
+    modbus_connection::{
+        self, Capabilities, DerKind, Metering, Model711Ctl, Settings, Status, Transport,
+    },
 };
 use sunspec::models::{model701, model703};
 use tokio::{
@@ -170,6 +172,13 @@ async fn reads_device_state() {
                 .expect("Mock has no PCT_SF"),
         )
     });
+    // The mock advertises a non-zero charge rate, so it should be classified as
+    // storage and every polled status should carry that.
+    let expected_der_kind = Some(DerKind {
+        generation: false,
+        storage: true,
+    });
+
     // Expect received capabilities struct.
     assert!(all_events.iter().any(
         |ev| matches!(ev, modbus_connection::Event::CapabilitiesPolled(
@@ -185,7 +194,7 @@ async fn reads_device_state() {
             .iter()
             .any(|ev| matches!(ev, modbus_connection::Event::StatePolled(
                 Some(Status {
-                    st, soc, ..
+                    st, soc, der_kind, ..
                 }),
                 Some(Settings {
                     esv_hi
@@ -197,6 +206,7 @@ async fn reads_device_state() {
                 && soc == &expected_soc
                 && st == &expected_st
                 && w == &expected_w
+                && der_kind == &expected_der_kind
             ))
     );
 }
