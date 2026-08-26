@@ -70,20 +70,42 @@ Envoy by default has no default controls or scheduled controls created for this
 device. While running the client you should be able to set these up and have the
 server inform the client of new defaults and new controls.
 
-Running the script in `examples/create_envoy_controls.sh` will setup a second
-Site Control Group (DERProgram) in addition to the default one created by envoy,
-and assign defaults to the program and its controls. Note that you will need to
-have already started the client so that the device is registered before running
-this script.
+First assign the bridge client to a site group:
+```
+# Create a site group
+curl -X POST -i --user admin:password \
+  http://127.0.0.1:8001/site_group \
+  --json '{
+  "name": "test_group",
+  "default_group": true
+}'
 
-After creating these controls in envoy you should see something along the lines
-of (with trace logging enabled):
+# You should see a 201 response with location `/site_group/test_group`
+
+# Assign the site to the site group
+curl -X POST -i --user admin:password \
+  http://127.0.0.1:8001/site_group/test_group/assignments \
+  --json '{"site_id": 1}'
 ```
-[... DEBUG sep2_bridge::poll_handlers] Polled DERControlList, returned 2/2 items.
-[... TRACE sep2_bridge::sep2_model] Program 20000000000000010000000100000000 (ContractedPremisesServiceProvider): num controls (after filter by status) (after all filtering) (+ default): 0 (0) (0) (+ 1)
-[... TRACE sep2_bridge::sep2_model] Program 20000000000000020000000100000000 (InHomeEnergyManagementSystem): num controls (after filter by status) (after all filtering) (+ default): 2 (2) (2) (+ 0)
-[... TRACE sep2_bridge::scheduler] Would have applied setpoint with 5 attributes
-[... TRACE sep2_bridge::sep2_model] Program 20000000000000010000000100000000 (ContractedPremisesServiceProvider): num controls (after filter by status) (after all filtering) (+ default): 0 (0) (0) (+ 1)
-[... TRACE sep2_bridge::sep2_model] Program 20000000000000020000000100000000 (InHomeEnergyManagementSystem): num controls (after filter by status) (after all filtering) (+ default): 2 (2) (2) (+ 0)
-[... TRACE sep2_bridge::scheduler] Schedule next time: number of controls (active): 3 (2)
+
+To then apply a control to the default control group, that will take immediate
+effect for the next 5 minutes, you can send:
 ```
+
+NOW=$(date --utc '+%Y-%m-%dT%H:%M:%SZ')
+
+curl -X POST -i --user admin:password \
+  http://127.0.0.1:8001/site_control_group/1/controls \
+  --json '[
+  {
+    "site_group_id": 1,
+    "calculation_log_id": null,
+    "duration_seconds": 300,
+    "start_time": "'$NOW'",
+    "set_point_percentage": 50
+  }
+]'
+```
+
+Other parameters can be changed in envoy to set more parameters, add site
+control groups (mapping to DERPrograms) and add default controls (mapping to DefaultDERControls).
