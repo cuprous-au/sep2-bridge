@@ -18,66 +18,6 @@ curl -X POST \
 
 # Inspect the output. You should see a 201 response with location `/site_control_group/2`.
 
-# Set defaults on pre-existing control group
-curl -X POST -i \
-  http://127.0.0.1:8001/site_control_group/1/default \
-  --user 'admin:password' \
-  --json '{
-  "import_limit_watts": {
-    "value": 500
-  },
-  "export_limit_watts": {
-    "value": 500
-  },
-  "generation_limit_watts": {
-    "value": 500
-  },
-  "load_limit_watts": {
-    "value": 500
-  },
-  "ramp_rate_percent_per_second": {
-    "value": 500
-  }
-}'
-
-# Set defaults on new control group
-curl -X POST -i \
-  http://127.0.0.1:8001/site_control_group/2/default \
-  --user 'admin:password' \
-  --json '{
-  "import_limit_watts": {
-    "value": 42
-  },
-  "export_limit_watts": {
-    "value": 42
-  },
-  "generation_limit_watts": {
-    "value": 42
-  },
-  "load_limit_watts": {
-    "value": 42
-  },
-  "ramp_rate_percent_per_second": {
-    "value": 42
-  }
-}'
-
-# Create a calculation log (necessary for a control)
-curl -X POST -i \
-  http://127.0.0.1:8001/calculation_log \
-  --user 'admin:password' \
-  --json '{
-  "calculation_range_start": "2010-01-02T00:00:01Z",
-  "calculation_range_duration_seconds": 2,
-  "interval_width_seconds": 300,
-  "variable_metadata": [{"variable_id": 1, "name": "variable 1", "description": "aaa"}],
-  "variable_values": {"variable_ids": [1], "site_ids": [1], "interval_periods": [1], "values": [1.24]},
-  "label_metadata": [{"label_id": 6, "name": "nice label", "description": "nice"}],
-  "label_values": {"label_ids": [6], "site_ids": [1], "values": ["aa"]}
-}'
-
-# You should see a 201 with location `/calculation_log/1`
-
 # Create a site group
 curl -X POST -i \
   http://127.0.0.1:8001/site_group \
@@ -97,22 +37,17 @@ curl -X POST -i \
   "site_id": 1
 }'
 
+# Create a set point
+# 
 curl -X POST -i \
   http://127.0.0.1:8001/site_control_group/2/controls \
   --user 'admin:password' \
   --json '[
   {
     "site_group_id": 1,
-    "calculation_log_id": 1,
+    "calculation_log_id": null,
     "duration_seconds": 300,
-    "start_time": "2026-08-10T00:10:00Z",
-    "import_limit_watts": 500
-  },
-  {
-    "site_group_id": 1,
-    "calculation_log_id": 1,
-    "duration_seconds": 300,
-    "start_time": "2026-08-11T00:10:00Z",
-    "import_limit_watts": 500
+    "start_time": "2026-08-26T00:30:00Z",
+    "import_limit_watts": 5000
   }
 ]'
