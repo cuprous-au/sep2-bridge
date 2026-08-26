@@ -127,17 +127,18 @@ impl TryConvert<DERCapability> for ModbusCapabilities {
 
 impl TryConvert<DERStatus> for ModbusStatus {
     fn try_convert(self: ModbusStatus) -> Result<DERStatus> {
-        // TODO: Work out how to translate conn_st, should it be gen_connect_status or stor_connect_status?
-        if self.conn_st.is_some() {
-            return Err(Error::Unknown.name("conn_st"));
-        }
+        let connect_status = self
+            .conn_st
+            .try_convert()
+            .map_err(|err| err.name("conn_st"))?;
+
         Ok(DERStatus {
             operational_mode_status: self
                 .st
                 .try_convert()
                 .map_err(|err| err.name("operational_mode_status"))?,
-            gen_connect_status: None,
-            stor_connect_status: None,
+            gen_connect_status: connect_status.clone(),
+            stor_connect_status: connect_status,
             alarm_status: self
                 .alrm
                 .try_convert()
@@ -505,10 +506,7 @@ impl TryConvertUnnamed<ConnectStatusType> for model701::ConnSt {
             date_time: Int64(Utc::now().timestamp()),
             value: match self {
                 model701::ConnSt::Disconnected => ConnectStatusValue::empty(),
-                model701::ConnSt::Connected => {
-                    // TODO: Figure out what we say exactly here
-                    Err(Error::Unknown)?
-                }
+                model701::ConnSt::Connected => ConnectStatusValue::Connected,
                 model701::ConnSt::Invalid(_) => Err(Error::UnmappableInvalid)?,
             },
         })
@@ -793,8 +791,7 @@ mod tests {
     fn status() {
         let status = ModbusStatus {
             st: Some(model701::St::On),
-            // TODO: once this is translatable, add a value back in.
-            conn_st: None,
+            conn_st: Some(model701::ConnSt::Connected),
             alrm: Some(model701::Alrm::AcOverVolt),
             soc: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
         };
