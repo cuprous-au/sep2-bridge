@@ -101,10 +101,13 @@ curl -X POST -i --user admin:password \
     "calculation_log_id": null,
     "duration_seconds": 300,
     "start_time": "'$NOW'",
-    "set_point_percentage": 50
+    "set_point_percentage": -50
   }
 ]'
 ```
+
+Note that in the above, the set point is expressed as a negative value to indicate
+that it is a limit on power consumed, not generated.
 
 Other parameters can be changed in envoy to set more parameters, add site
 control groups (mapping to DERPrograms) and add default controls (mapping to DefaultDERControls).
