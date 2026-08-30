@@ -324,18 +324,28 @@ impl TryConvert<ModbusParameters> for ControlAttributes {
             w_max_lim_pct: self
                 .base
                 .op_mod_max_lim_w
-                .try_convert()
-                .map_err(|err| err.name("w_max_lim_pct"))?
+                .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
 
             // AS5438 - Table F.12 to E.12
-            w_set_ena: self.base.op_mod_fixed_w.is_some().convert(),
+            w_set_ena: (self.base.op_mod_fixed_w.is_some()
+                || self.base.op_mod_target_w.is_some())
+            .convert(),
             w_set_pct: self
                 .base
                 .op_mod_fixed_w
-                .try_convert()
-                .map_err(|err| err.name("w_set_pct"))?
+                .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
+            w_set: self.base.op_mod_target_w.clone().convert(),
+            // Also set WSetMod conditionally. If both WSet and WSetPct are
+            // available this is likely a mistake from upstream, however default
+            // to WSetPct as that is the specified in the AS5438 spec.
+            w_set_mod: match (self.base.op_mod_fixed_w, self.base.op_mod_target_w) {
+                (None, None) => None,
+                (Some(_), None) => Some(model704::WSetMod::WMaxPct),
+                (None, Some(_)) => Some(model704::WSetMod::Watts),
+                (Some(_), Some(_)) => Some(model704::WSetMod::WMaxPct),
+            },
         })
     }
 }
@@ -367,23 +377,13 @@ trait TryConvertUnnamed<T> {
     fn try_convert(self) -> ResultUnnamed<T>;
 }
 
-impl<T, U: Convert<T>> TryConvertUnnamed<T> for U {
-    fn try_convert(self) -> ResultUnnamed<T> {
-        Ok(self.convert())
-    }
-}
-
 // Specialised trait for options to avoid getting tied in knots with nested traits.
-trait OptionConvert<T, U: TryConvertUnnamed<T>> {
+trait OptionTryConvert<T, U: TryConvertUnnamed<T>> {
     fn try_convert(self) -> ResultUnnamed<Option<T>>;
     // Conversions to error on missing values.
     fn try_convert_mandatory(self) -> ResultUnnamed<T>;
-    // Conversions without errors
-    fn convert(self) -> Option<T>
-    where
-        U: Convert<T>;
 }
-impl<T, U> OptionConvert<T, U> for Option<U>
+impl<T, U> OptionTryConvert<T, U> for Option<U>
 where
     U: TryConvertUnnamed<T>,
 {
@@ -397,7 +397,15 @@ where
     fn try_convert(self: Option<U>) -> ResultUnnamed<Option<T>> {
         self.map(|inner| inner.try_convert()).transpose()
     }
-
+}
+trait OptionConvert<T, U: Convert<T>> {
+    // Conversions without errors
+    fn convert(self) -> Option<T>;
+}
+impl<T, U> OptionConvert<T, U> for Option<U>
+where
+    U: Convert<T>,
+{
     fn convert(self: Option<U>) -> Option<T>
     where
         U: Convert<T>,
@@ -674,6 +682,41 @@ impl Convert<Model711Ctl> for FreqDroopType {
             k_of: ScaledValue::new(self.k_of.0, SEP2_THOUSANDTHS_SF),
             k_uf: ScaledValue::new(self.k_uf.0, SEP2_THOUSANDTHS_SF),
             rsp_tms: ScaledValue::new(self.open_loop_tms.convert(), SEP2_HUNDREDTHS_SF),
+        }
+    }
+}
+
+impl Convert<ScaledValue<i32>> for ActivePower {
+    fn convert(self: ActivePower) -> ScaledValue<i32> {
+        ScaledValue {
+            value: i32::from(self.value.0),
+            sf: self.multiplier.convert(),
+        }
+    }
+}
+
+impl Convert<i16> for PowerOfTenMultiplierType {
+    fn convert(self: PowerOfTenMultiplierType) -> i16 {
+        match self {
+            PowerOfTenMultiplierType::Nano => -9,
+            PowerOfTenMultiplierType::NegativeEight => -8,
+            PowerOfTenMultiplierType::NegativeSeven => -7,
+            PowerOfTenMultiplierType::Micro => -6,
+            PowerOfTenMultiplierType::NegativeFive => -5,
+            PowerOfTenMultiplierType::NegativeFour => -4,
+            PowerOfTenMultiplierType::Milli => -3,
+            PowerOfTenMultiplierType::Centi => -2,
+            PowerOfTenMultiplierType::Deci => -1,
+            PowerOfTenMultiplierType::None => 0,
+            PowerOfTenMultiplierType::Deca => 1,
+            PowerOfTenMultiplierType::Hecto => 2,
+            PowerOfTenMultiplierType::Kilo => 3,
+            PowerOfTenMultiplierType::Four => 4,
+            PowerOfTenMultiplierType::Five => 5,
+            PowerOfTenMultiplierType::Mega => 6,
+            PowerOfTenMultiplierType::Seven => 7,
+            PowerOfTenMultiplierType::Eight => 8,
+            PowerOfTenMultiplierType::Giga => 9,
         }
     }
 }
