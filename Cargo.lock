@@ -1877,9 +1877,9 @@ dependencies = [
 
 [[package]]
 name = "sunspec"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e9d9b646ab312afdd8b2b580572ace96071dad4fce0f61f1aa8a3a2c6502521"
+checksum = "76af4b6503ee8aee422bd0629bea94eb1fca68ab5a3e9166a03c94b8c63cb5d9"
 dependencies = [
  "bitflags 2.13.1",
  "strum",
