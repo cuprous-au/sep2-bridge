@@ -1,0 +1,102 @@
+# Implementation details for AS5438
+
+## Overview
+
+The AS5438 standard document (in draft as of 2026-08-31) describes the required
+parameters for an inverter system to be interoperable with the energy grid. It
+also provides explicit mappings for the CSIP-AUS, SunSpec Modbus and OCPP
+protocols for the set of parameters.
+
+In this crate, these mappings are used to translate parameters from CSIP-AUS to
+SunSpec Modbus. However, some parameters are only loosely coupled and either require
+some additional parameters to be set, or a decision on how to apply the values. This
+file documents the choices made in this crate.
+
+## Scaling factors (Tables E.1-12)
+
+The SunSpec models contain scaling factors for many parameters. While not
+explicitly mentioned in AS5438, it is a requirement that the modbus client reads
+the scaling factors to interpret values obtained from reads and convert values
+to write into the correct scale.
+
+## Curve group assignments (Tables E.4, E.6-8)
+
+When assigning to a curve, there is always a list of curve (or curve set, this
+section will stick to the language of "curve" alone) options with up to `NCrv`
+curves available. Each curve can support up to `NPt` points. The bridge service
+will read these two constants when determining how to apply a curve. If `NPt`
+is less than the length of the curve, then the bridge service will not apply the
+curve at all and discard it.
+
+If a model supports curves in the SunSpec definition, then it should also allow
+at least 2 curves in the model. The first is for the active applied settings and
+is readonly to the modbus client. The bridge service will not assume that
+`NCrv >= 2` however, and test this constant, and discard a curve if this is not
+true. The bridge service will always write to the curve in index 2 (the second curve).
+
+The assignment of a curve is also required to assign `ActPt`, the number of
+active points in the curve, which is allowed to be less than `NPt`. The
+bridge service assigns the x,y points up to `ActPt` and does not assign data
+points past this limit.
+
+After assignment is complete, the bridge service writes `2` to `AdptCrvReq`
+which requests the device take on the values in curve index 2. The bridge
+service always uses index 2 and assumes that the device will either update its
+settings based on updated values in the curve data points, or in response to a
+write to `AdptCrvReq`: hence it always writes 2, even if it has previously
+written 2 to `AdptCrvReq`.
+
+A pedantic comment about the tables in AS5438: the points mentioned vary from
+table to table in the length of the curve and the choice of index. It is assumed
+that AS5438 simply means "a set of curve data points with x and y values" for
+each of these tables.
+
+## Table E.6
+
+This table references model 706 for one point but 705 for the others. It is
+assumed this is a typo and the curve applies only to model 706.
+
+## Table E.9 (section E.4.7)
+
+The frequency droop SunSpec group is a repeating group `711.Ctl`. This follows a
+similar pattern to the curve group assignment but will be repeated here for
+completeness.
+
+The first element of the repeating group is a readonly value for the current
+settings of the device. The parameters are choosen to be assigned to the second
+element of the repeating group, if the model allows it (`711.NCtl` at least 2).
+If the model doesn't allow it, the parameters are dropped.
+
+In addition `711.Ena` is required to be set to enabled/disable if the frequency
+droop is passed or not, and `711.AdptCtlReq` is assigned 2 after the `Ctl` group
+data has been updated.
+
+## Table E.12 (section E.4.10)
+
+The SunSpec parameter `WSetMod` is not mentioned in the table. This parameter
+is intended to switch between percentage (`W_MAX_PCT`) and Watts (`WATTS`). We
+choose to set `WSetMod=W_MAX_PCT` when `WSetPct` is provided.
+
+## Tables F.3-10
+
+In many parameters in these tables, only `DERControl::X` is mentioned. To be
+pedantic, these settings exist on the `DERControlBase` object which can be
+specified through either a `DERControl` or a `DefaultDERControl`. In this
+crate, the appropriate value is derived through layering a set of scheduled
+`DERControl`s and a set of `DefaultDERControl`s using the primacy ordering
+specified in the CSIP-AUS spec.
+
+## Table F.2 (section F.3)
+
+The connection status is given two targets, `DERStatus::genConnectStatus` and
+`DERStatus::storConnectStatus`. While AS5438 describes these as parmeters to be
+read, we are using them to report to the CSIP-AUS server which is out of scope
+for AS5438. We assign the measured value from SunSpec `701.ConnSt` to both
+`DERStatus::genConnectStatus` and `DERStatus::storConnectStatus`.
+
+## Extension parameters
+
+In addition to those specified in the appendices of AS5438 we also support some
+more parameters:
+- Set active power in Watts: `opModTargetW` -> `WSet`
+- Readings of power for 3-phase: (SunSpec `701.WL1`, etc...).
