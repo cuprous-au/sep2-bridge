@@ -510,185 +510,38 @@ async fn send_new_parameters(
     device: &AsyncDevice<TokioModbusContext>,
     parameters: &Parameters,
 ) -> Result<()> {
-    // This is an ugly utility function to make the rest of the parameters less ugly.
-    // The main point is that we only send the value if it is Some.
-    async fn write_if_some<T: FixedSize, M: Model>(
-        device: &AsyncDevice<TokioModbusContext>,
-        p: Point<M, Option<T>>,
-        value: Option<T>,
-    ) -> Result<()> {
-        match value {
-            None => Ok(()),
-            Some(value) => device.write_point(p, Some(value)).await.map_err(comm_err),
-        }
-    }
-    // As above but with a ScaledValue and a target scale factor.
-    async fn write_rescaled_if_some<T: FixedSize + ScaledValueInner, M: Model>(
-        device: &AsyncDevice<TokioModbusContext>,
-        p: Point<M, Option<T>>,
-        value: Option<ScaledValue<T>>,
-        scale_factor: i16,
-    ) -> Result<()> {
-        write_if_some(
-            device,
-            p,
-            value.map(|inner| inner.rescale(scale_factor).value),
-        )
-        .await
-    }
-
-    // AS5438 - Table E.9, Section E.4.7
-    if device.models.supported_model_ids().contains(&711) {
-        let ena = if let Some(droop_ctl) = parameters.droop_ctl.as_ref() {
-            // As per the modbus spec, the first control is readonly and represents
-            // the current state. Make sure the device allows at least one other
-            // control before continuing.
-            let n_ctl = device.read_point(Model711::N_CTL).await.map_err(comm_err)?;
-            if n_ctl >= 2 {
-                // We write into the second Ctl group.
-                let offset =
-                    Model711::addr(&device.models).addr + Model711::LEN + model711::Ctl::LEN;
-
-                let db_sf = device.read_point(Model711::DB_SF).await.map_err(comm_err)?;
-                let k_sf = device.read_point(Model711::K_SF).await.map_err(comm_err)?;
-                let rsp_tms_sf = device
-                    .read_point(Model711::RSP_TMS_SF)
-                    .await
-                    .map_err(comm_err)?;
-                // And assign manually
-
-                // FIXME: It would be nice to write all of these registers in one
-                // call. However, we can't write the read_only register itself
-                // so it's not as trivial as encoding the entire struct.
-                write_offset_point(
-                    device,
-                    offset,
-                    model711::Ctl::DB_OF,
-                    droop_ctl.db_of.rescale(db_sf).value,
-                )
-                .await?;
-                write_offset_point(
-                    device,
-                    offset,
-                    model711::Ctl::DB_UF,
-                    droop_ctl.db_uf.rescale(db_sf).value,
-                )
-                .await?;
-                write_offset_point(
-                    device,
-                    offset,
-                    model711::Ctl::K_OF,
-                    droop_ctl.k_of.rescale(k_sf).value,
-                )
-                .await?;
-                write_offset_point(
-                    device,
-                    offset,
-                    model711::Ctl::K_UF,
-                    droop_ctl.k_uf.rescale(k_sf).value,
-                )
-                .await?;
-                write_offset_point(
-                    device,
-                    offset,
-                    model711::Ctl::RSP_TMS,
-                    droop_ctl.rsp_tms.rescale(rsp_tms_sf).value,
-                )
-                .await?;
-
-                // After filling the fields we request the Ctl group to be applied.
-                device
-                    .write_point(Model711::ADPT_CTL_REQ, 2)
-                    .await
-                    .map_err(comm_err)?;
-
-                model711::Ena::Enabled
-            } else {
-                model711::Ena::Disabled
-            }
-        } else {
-            model711::Ena::Disabled
-        };
-        device
-            .write_point(Model711::ENA, ena)
-            .await
-            .map_err(comm_err)?;
-    }
-
-    // AS5438 - Table E.10, Section E.4.8
-    if device.models.supported_model_ids().contains(&703) {
-        write_if_some(device, Model703::ES, parameters.es).await?;
-        if parameters.esv_hi.is_some() || parameters.esv_lo.is_some() {
-            let v_sf = device
-                .read_point(Model703::V_SF)
-                .await
-                .map_err(comm_err)?
-                .unwrap_or_default();
-            write_rescaled_if_some(device, Model703::ESV_HI, parameters.esv_hi, v_sf).await?;
-            write_rescaled_if_some(device, Model703::ESV_LO, parameters.esv_lo, v_sf).await?;
-        }
-        if parameters.es_hz_hi.is_some() || parameters.es_hz_lo.is_some() {
-            let hz_sf = device
-                .read_point(Model703::HZ_SF)
-                .await
-                .map_err(comm_err)?
-                .unwrap_or_default();
-            write_rescaled_if_some(device, Model703::ES_HZ_HI, parameters.es_hz_hi, hz_sf).await?;
-            write_rescaled_if_some(device, Model703::ES_HZ_LO, parameters.es_hz_lo, hz_sf).await?;
-        }
-        write_if_some(device, Model703::ES_DLY_TMS, parameters.es_dly_tms).await?;
-        write_if_some(device, Model703::ES_RND_TMS, parameters.es_rnd_tms).await?;
-        write_if_some(device, Model703::ES_RMP_TMS, parameters.es_rmp_tms).await?;
-    }
-
-    if device.models.supported_model_ids().contains(&704) {
-        // AS5438 - Table E.11, Section E.4.9
-        write_if_some(
-            device,
-            Model704::W_MAX_LIM_PCT_ENA,
-            parameters.w_max_lim_pct_ena,
-        )
-        .await?;
-        if parameters.w_max_lim_pct.is_some() {
-            let pct_sf = device
-                .read_point(Model704::W_MAX_LIM_PCT_SF)
-                .await
-                .map_err(comm_err)?
-                .unwrap_or_default();
-            write_rescaled_if_some(
-                device,
-                Model704::W_MAX_LIM_PCT,
-                parameters.w_max_lim_pct,
-                pct_sf,
-            )
-            .await?;
-        }
-
-        // AS5438 - Table E.12, Section E.4.10
-        write_if_some(device, Model704::W_SET_ENA, parameters.w_set_ena).await?;
-        if parameters.w_set_pct.is_some() {
-            let pct_sf = device
-                .read_point(Model704::W_SET_PCT_SF)
-                .await
-                .map_err(comm_err)?
-                .unwrap_or_default();
-            write_rescaled_if_some(device, Model704::W_SET_PCT, parameters.w_set_pct, pct_sf)
-                .await?;
-        }
-        // Extension: also write WSet if available and write WSetMod to indicate
-        // which is chosen.
-        if parameters.w_set.is_some() {
-            let w_set_sf = device
-                .read_point(Model704::W_SET_SF)
-                .await
-                .map_err(comm_err)?
-                .unwrap_or_default();
-            write_rescaled_if_some(device, Model704::W_SET, parameters.w_set, w_set_sf).await?;
-        }
-        write_if_some(device, Model704::W_SET_MOD, parameters.w_set_mod).await?;
-    }
+    send_model703_parameters(device, parameters).await?;
+    send_model704_parameters(device, parameters).await?;
+    send_model711_parameters(device, parameters).await?;
 
     Ok(())
+}
+
+/// Conditionally writes only when the value is Some(_).
+async fn write_if_some<T: FixedSize, M: Model>(
+    device: &AsyncDevice<TokioModbusContext>,
+    p: Point<M, Option<T>>,
+    value: Option<T>,
+) -> Result<()> {
+    match value {
+        None => Ok(()),
+        Some(value) => device.write_point(p, Some(value)).await.map_err(comm_err),
+    }
+}
+
+/// As for write_if_some, but with a ScaledValue and a target scale factor.
+async fn write_rescaled_if_some<T: FixedSize + ScaledValueInner, M: Model>(
+    device: &AsyncDevice<TokioModbusContext>,
+    p: Point<M, Option<T>>,
+    value: Option<ScaledValue<T>>,
+    scale_factor: i16,
+) -> Result<()> {
+    write_if_some(
+        device,
+        p,
+        value.map(|inner| inner.rescale(scale_factor).value),
+    )
+    .await
 }
 
 /// A convenience tool for writing points that are part of repeating groups.
@@ -707,4 +560,181 @@ async fn write_offset_point<G: Group, T: Value>(
         .write_registers(device.slave_id, addr, &words)
         .await
         .map_err(comm_err)
+}
+
+/////
+// Writes arranged according to the specific models.
+async fn send_model703_parameters(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+) -> Result<()> {
+    if !device.models.supported_model_ids().contains(&703) {
+        return Ok(());
+    }
+
+    // AS5438 - Table E.10, Section E.4.8
+    write_if_some(device, Model703::ES, parameters.es).await?;
+    if parameters.esv_hi.is_some() || parameters.esv_lo.is_some() {
+        let v_sf = device
+            .read_point(Model703::V_SF)
+            .await
+            .map_err(comm_err)?
+            .unwrap_or_default();
+        write_rescaled_if_some(device, Model703::ESV_HI, parameters.esv_hi, v_sf).await?;
+        write_rescaled_if_some(device, Model703::ESV_LO, parameters.esv_lo, v_sf).await?;
+    }
+    if parameters.es_hz_hi.is_some() || parameters.es_hz_lo.is_some() {
+        let hz_sf = device
+            .read_point(Model703::HZ_SF)
+            .await
+            .map_err(comm_err)?
+            .unwrap_or_default();
+        write_rescaled_if_some(device, Model703::ES_HZ_HI, parameters.es_hz_hi, hz_sf).await?;
+        write_rescaled_if_some(device, Model703::ES_HZ_LO, parameters.es_hz_lo, hz_sf).await?;
+    }
+    write_if_some(device, Model703::ES_DLY_TMS, parameters.es_dly_tms).await?;
+    write_if_some(device, Model703::ES_RND_TMS, parameters.es_rnd_tms).await?;
+    write_if_some(device, Model703::ES_RMP_TMS, parameters.es_rmp_tms).await?;
+
+    Ok(())
+}
+
+async fn send_model704_parameters(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+) -> Result<()> {
+    if !device.models.supported_model_ids().contains(&704) {
+        return Ok(());
+    }
+
+    // AS5438 - Table E.11, Section E.4.9
+    write_if_some(
+        device,
+        Model704::W_MAX_LIM_PCT_ENA,
+        parameters.w_max_lim_pct_ena,
+    )
+    .await?;
+    if parameters.w_max_lim_pct.is_some() {
+        let pct_sf = device
+            .read_point(Model704::W_MAX_LIM_PCT_SF)
+            .await
+            .map_err(comm_err)?
+            .unwrap_or_default();
+        write_rescaled_if_some(
+            device,
+            Model704::W_MAX_LIM_PCT,
+            parameters.w_max_lim_pct,
+            pct_sf,
+        )
+        .await?;
+    }
+
+    // AS5438 - Table E.12, Section E.4.10
+    write_if_some(device, Model704::W_SET_ENA, parameters.w_set_ena).await?;
+    if parameters.w_set_pct.is_some() {
+        let pct_sf = device
+            .read_point(Model704::W_SET_PCT_SF)
+            .await
+            .map_err(comm_err)?
+            .unwrap_or_default();
+        write_rescaled_if_some(device, Model704::W_SET_PCT, parameters.w_set_pct, pct_sf).await?;
+    }
+    // Extension: also write WSet if available and write WSetMod to indicate
+    // which is chosen.
+    if parameters.w_set.is_some() {
+        let w_set_sf = device
+            .read_point(Model704::W_SET_SF)
+            .await
+            .map_err(comm_err)?
+            .unwrap_or_default();
+        write_rescaled_if_some(device, Model704::W_SET, parameters.w_set, w_set_sf).await?;
+    }
+    write_if_some(device, Model704::W_SET_MOD, parameters.w_set_mod).await?;
+
+    Ok(())
+}
+
+async fn send_model711_parameters(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+) -> Result<()> {
+    if !device.models.supported_model_ids().contains(&711) {
+        return Ok(());
+    }
+
+    // AS5438 - Table E.9, Section E.4.7
+    let ena = if let Some(droop_ctl) = parameters.droop_ctl.as_ref() {
+        // As per the modbus spec, the first control is readonly and represents
+        // the current state. Make sure the device allows at least one other
+        // control before continuing.
+        let n_ctl = device.read_point(Model711::N_CTL).await.map_err(comm_err)?;
+        if n_ctl >= 2 {
+            // We write into the second Ctl group.
+            let offset = Model711::addr(&device.models).addr + Model711::LEN + model711::Ctl::LEN;
+
+            let db_sf = device.read_point(Model711::DB_SF).await.map_err(comm_err)?;
+            let k_sf = device.read_point(Model711::K_SF).await.map_err(comm_err)?;
+            let rsp_tms_sf = device
+                .read_point(Model711::RSP_TMS_SF)
+                .await
+                .map_err(comm_err)?;
+            // And assign manually
+
+            // FIXME: It would be nice to write all of these registers in one
+            // call. However, we can't write the read_only register itself
+            // so it's not as trivial as encoding the entire struct.
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::DB_OF,
+                droop_ctl.db_of.rescale(db_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::DB_UF,
+                droop_ctl.db_uf.rescale(db_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::K_OF,
+                droop_ctl.k_of.rescale(k_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::K_UF,
+                droop_ctl.k_uf.rescale(k_sf).value,
+            )
+            .await?;
+            write_offset_point(
+                device,
+                offset,
+                model711::Ctl::RSP_TMS,
+                droop_ctl.rsp_tms.rescale(rsp_tms_sf).value,
+            )
+            .await?;
+
+            device
+                .write_point(Model711::ADPT_CTL_REQ, 2)
+                .await
+                .map_err(comm_err)?;
+            model711::Ena::Enabled
+        } else {
+            model711::Ena::Disabled
+        }
+    } else {
+        model711::Ena::Disabled
+    };
+
+    device
+        .write_point(Model711::ENA, ena)
+        .await
+        .map_err(comm_err)?;
+
+    Ok(())
 }
