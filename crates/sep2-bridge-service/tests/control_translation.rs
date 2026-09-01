@@ -158,6 +158,12 @@ async fn applies_as5438_tables_11_12() {
     )
     .await;
     assert_register(&mock, "model704::W_SET_PCT", Some(EXPECTED_W_SET_PCT)).await;
+    assert_register(
+        &mock,
+        "model704::W_SET_MOD",
+        Some(model704::WSetMod::WMaxPct),
+    )
+    .await;
 }
 
 /// Tests that an active DERControl's opModFreqDroop reaches model 711. The

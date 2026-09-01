@@ -494,6 +494,11 @@ pub fn add_model_704(
         "model704::W_SET_ENA".into(),
         location(Model704::W_SET_ENA, offset),
     );
+    Model704::W_SET_MOD.fill_registers(registers, offset, None);
+    locations.insert(
+        "model704::W_SET_MOD".into(),
+        location(Model704::W_SET_MOD, offset),
+    );
     Model704::W_SET_PCT.fill_registers(registers, offset, Some(0));
     locations.insert(
         "model704::W_SET_PCT".into(),
@@ -503,6 +508,13 @@ pub fn add_model_704(
     locations.insert(
         "model704::W_SET_PCT_SF".into(),
         location(Model704::W_SET_PCT_SF, offset),
+    );
+    Model704::W_SET.fill_registers(registers, offset, None);
+    locations.insert("model704::W_SET".into(), location(Model704::W_SET, offset));
+    Model704::W_SET_SF.fill_registers(registers, offset, Some(-2));
+    locations.insert(
+        "model704::W_SET_SF".into(),
+        location(Model704::W_SET_SF, offset),
     );
 
     offset + usize::from(length)

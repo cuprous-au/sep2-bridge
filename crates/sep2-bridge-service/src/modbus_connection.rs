@@ -66,8 +66,12 @@ pub struct Parameters {
     pub w_max_lim_pct: Option<ScaledValue<u16>>,
 
     // AS5438 - Table 12, Section E.4.10
-    pub w_set_ena: Option<model704::WSetEna>,
     pub w_set_pct: Option<ScaledValue<i16>>,
+    // Extension - ena and mod are required to implement w_set_pct. w_set is an
+    // alternative way to specify the set point.
+    pub w_set_ena: Option<model704::WSetEna>,
+    pub w_set_mod: Option<model704::WSetMod>,
+    pub w_set: Option<ScaledValue<i32>>,
     // TODO: Add the remaining parameters required by AS5438
 }
 
@@ -654,6 +658,17 @@ async fn send_new_parameters(
             write_rescaled_if_some(device, Model704::W_SET_PCT, parameters.w_set_pct, pct_sf)
                 .await?;
         }
+        // Extension: also write WSet if available and write WSetMod to indicate
+        // which is chosen.
+        if parameters.w_set.is_some() {
+            let w_set_sf = device
+                .read_point(Model704::W_SET_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default();
+            write_rescaled_if_some(device, Model704::W_SET, parameters.w_set, w_set_sf).await?;
+        }
+        write_if_some(device, Model704::W_SET_MOD, parameters.w_set_mod).await?;
     }
 
     Ok(())
