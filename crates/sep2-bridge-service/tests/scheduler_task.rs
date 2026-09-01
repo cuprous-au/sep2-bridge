@@ -235,7 +235,7 @@ async fn produces_schedule_on_time() {
     assert_eq!(events.len(), 2);
     assert!(events.iter().any(|event| match event {
         scheduler::Event::ParametersChanged(parameters) => {
-            assert_eq!(parameters.base.op_mod_connect, Some(true));
+            assert_eq!(parameters.op_mod_connect, Some(true));
             true
         }
         _ => false,
@@ -271,7 +271,7 @@ async fn produces_schedule_on_time() {
     assert_eq!(events.len(), 2);
     assert!(events.iter().any(|event| match event {
         scheduler::Event::ParametersChanged(parameters) => {
-            assert_eq!(parameters.base.op_mod_connect, None);
+            assert_eq!(parameters.op_mod_connect, None);
             true
         }
         _ => false,

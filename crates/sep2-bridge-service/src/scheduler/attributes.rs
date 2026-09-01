@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
 use sep2_common::packages::{
-    der::{DERControl, DERControlBase, DefaultDERControl},
+    der::{
+        ActivePower, DERControl, DERControlBase, DERCurve, DefaultDERControl, FixedVar,
+        FreqDroopType, PowerFactorWithExcitation, ReactivePower,
+    },
     primitives::{Int16, Uint16, Uint32},
+    types::{Percent, SignedPercent},
 };
 
 use super::Event;
@@ -14,8 +18,39 @@ use super::Event;
 /// This is a subset of the parameters available on a DefaultDERControl struct.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ControlAttributes {
-    pub base: DERControlBase,
+    // These parameters come from DERControlBase, with DERCurveLink replaced with DERCurve.
+    pub op_mod_connect: Option<bool>,
+    pub op_mod_energize: Option<bool>,
+    pub op_mod_fixed_pf_absorb_w: Option<PowerFactorWithExcitation>,
+    pub op_mod_fixed_pf_inject_w: Option<PowerFactorWithExcitation>,
+    pub op_mod_fixed_var: Option<FixedVar>,
+    pub op_mod_fixed_w: Option<SignedPercent>,
+    pub op_mod_freq_droop: Option<FreqDroopType>,
+    pub op_mod_freq_watt: Option<DERCurve>,
+    pub op_mod_hfrt_may_trip: Option<DERCurve>,
+    pub op_mod_hfrt_must_trip: Option<DERCurve>,
+    pub op_mod_hvrt_may_trip: Option<DERCurve>,
+    pub op_mod_hvrt_momentary_cessation: Option<DERCurve>,
+    pub op_mod_hvrt_must_trip: Option<DERCurve>,
+    pub op_mod_lfrt_may_trip: Option<DERCurve>,
+    pub op_mod_lfrt_must_trip: Option<DERCurve>,
+    pub op_mod_lvrt_may_trip: Option<DERCurve>,
+    pub op_mod_lvrt_momentary_cessation: Option<DERCurve>,
+    pub op_mod_lvrt_must_trip: Option<DERCurve>,
+    pub op_mod_max_lim_w: Option<Percent>,
+    pub op_mod_target_var: Option<ReactivePower>,
+    pub op_mod_target_w: Option<ActivePower>,
+    pub op_mod_volt_var: Option<DERCurve>,
+    pub op_mod_volt_watt: Option<DERCurve>,
+    pub op_mod_watt_pf: Option<DERCurve>,
+    pub op_mod_watt_var: Option<DERCurve>,
+    pub ramp_tms: Option<Uint16>,
+    pub op_mod_imp_lim_w: Option<ActivePower>,
+    pub op_mod_exp_lim_w: Option<ActivePower>,
+    pub op_mod_gen_lim_w: Option<ActivePower>,
+    pub op_mod_load_lim_w: Option<ActivePower>,
 
+    // These parameters come from DefaultDERControl.
     pub set_es_delay: Option<Uint32>,
     pub set_es_high_freq: Option<Uint16>,
     pub set_es_high_volt: Option<Int16>,
@@ -30,36 +65,36 @@ pub struct ControlAttributes {
 impl ControlAttributes {
     /// Total distinct attributes that would be applied.
     pub fn num_active(&self) -> u32 {
-        self.base.op_mod_connect.is_some() as u32
-            + self.base.op_mod_energize.is_some() as u32
-            + self.base.op_mod_fixed_pf_absorb_w.is_some() as u32
-            + self.base.op_mod_fixed_pf_inject_w.is_some() as u32
-            + self.base.op_mod_fixed_var.is_some() as u32
-            + self.base.op_mod_fixed_w.is_some() as u32
-            + self.base.op_mod_freq_droop.is_some() as u32
-            + self.base.op_mod_freq_watt.is_some() as u32
-            + self.base.op_mod_hfrt_may_trip.is_some() as u32
-            + self.base.op_mod_hfrt_must_trip.is_some() as u32
-            + self.base.op_mod_hvrt_may_trip.is_some() as u32
-            + self.base.op_mod_hvrt_momentary_cessation.is_some() as u32
-            + self.base.op_mod_hvrt_must_trip.is_some() as u32
-            + self.base.op_mod_lfrt_may_trip.is_some() as u32
-            + self.base.op_mod_lfrt_must_trip.is_some() as u32
-            + self.base.op_mod_lvrt_may_trip.is_some() as u32
-            + self.base.op_mod_lvrt_momentary_cessation.is_some() as u32
-            + self.base.op_mod_lvrt_must_trip.is_some() as u32
-            + self.base.op_mod_max_lim_w.is_some() as u32
-            + self.base.op_mod_target_var.is_some() as u32
-            + self.base.op_mod_target_w.is_some() as u32
-            + self.base.op_mod_volt_var.is_some() as u32
-            + self.base.op_mod_volt_watt.is_some() as u32
-            + self.base.op_mod_watt_pf.is_some() as u32
-            + self.base.op_mod_watt_var.is_some() as u32
-            + self.base.ramp_tms.is_some() as u32
-            + self.base.op_mod_imp_lim_w.is_some() as u32
-            + self.base.op_mod_exp_lim_w.is_some() as u32
-            + self.base.op_mod_gen_lim_w.is_some() as u32
-            + self.base.op_mod_load_lim_w.is_some() as u32
+        self.op_mod_connect.is_some() as u32
+            + self.op_mod_energize.is_some() as u32
+            + self.op_mod_fixed_pf_absorb_w.is_some() as u32
+            + self.op_mod_fixed_pf_inject_w.is_some() as u32
+            + self.op_mod_fixed_var.is_some() as u32
+            + self.op_mod_fixed_w.is_some() as u32
+            + self.op_mod_freq_droop.is_some() as u32
+            + self.op_mod_freq_watt.is_some() as u32
+            + self.op_mod_hfrt_may_trip.is_some() as u32
+            + self.op_mod_hfrt_must_trip.is_some() as u32
+            + self.op_mod_hvrt_may_trip.is_some() as u32
+            + self.op_mod_hvrt_momentary_cessation.is_some() as u32
+            + self.op_mod_hvrt_must_trip.is_some() as u32
+            + self.op_mod_lfrt_may_trip.is_some() as u32
+            + self.op_mod_lfrt_must_trip.is_some() as u32
+            + self.op_mod_lvrt_may_trip.is_some() as u32
+            + self.op_mod_lvrt_momentary_cessation.is_some() as u32
+            + self.op_mod_lvrt_must_trip.is_some() as u32
+            + self.op_mod_max_lim_w.is_some() as u32
+            + self.op_mod_target_var.is_some() as u32
+            + self.op_mod_target_w.is_some() as u32
+            + self.op_mod_volt_var.is_some() as u32
+            + self.op_mod_volt_watt.is_some() as u32
+            + self.op_mod_watt_pf.is_some() as u32
+            + self.op_mod_watt_var.is_some() as u32
+            + self.ramp_tms.is_some() as u32
+            + self.op_mod_imp_lim_w.is_some() as u32
+            + self.op_mod_exp_lim_w.is_some() as u32
+            + self.op_mod_gen_lim_w.is_some() as u32
+            + self.op_mod_load_lim_w.is_some() as u32
             + self.set_es_delay.is_some() as u32
             + self.set_es_high_freq.is_some() as u32
             + self.set_es_high_volt.is_some() as u32
@@ -74,104 +109,52 @@ impl ControlAttributes {
     /// Combine this set of attributes with another. The attributes of this object are preferred.
     pub fn overlay_on(self, fallback: ControlAttributes) -> ControlAttributes {
         ControlAttributes {
-            base: DERControlBase {
-                op_mod_connect: self.base.op_mod_connect.or(fallback.base.op_mod_connect),
-                op_mod_energize: self.base.op_mod_energize.or(fallback.base.op_mod_energize),
-                op_mod_fixed_pf_absorb_w: self
-                    .base
-                    .op_mod_fixed_pf_absorb_w
-                    .or(fallback.base.op_mod_fixed_pf_absorb_w),
-                op_mod_fixed_pf_inject_w: self
-                    .base
-                    .op_mod_fixed_pf_inject_w
-                    .or(fallback.base.op_mod_fixed_pf_inject_w),
-                op_mod_fixed_var: self
-                    .base
-                    .op_mod_fixed_var
-                    .or(fallback.base.op_mod_fixed_var),
-                op_mod_fixed_w: self.base.op_mod_fixed_w.or(fallback.base.op_mod_fixed_w),
-                op_mod_freq_droop: self
-                    .base
-                    .op_mod_freq_droop
-                    .or(fallback.base.op_mod_freq_droop),
-                op_mod_freq_watt: self
-                    .base
-                    .op_mod_freq_watt
-                    .or(fallback.base.op_mod_freq_watt),
-                op_mod_hfrt_may_trip: self
-                    .base
-                    .op_mod_hfrt_may_trip
-                    .or(fallback.base.op_mod_hfrt_may_trip),
-                op_mod_hfrt_must_trip: self
-                    .base
-                    .op_mod_hfrt_must_trip
-                    .or(fallback.base.op_mod_hfrt_must_trip),
-                op_mod_hvrt_may_trip: self
-                    .base
-                    .op_mod_hvrt_may_trip
-                    .or(fallback.base.op_mod_hvrt_may_trip),
-                op_mod_hvrt_momentary_cessation: self
-                    .base
-                    .op_mod_hvrt_momentary_cessation
-                    .or(fallback.base.op_mod_hvrt_momentary_cessation),
-                op_mod_hvrt_must_trip: self
-                    .base
-                    .op_mod_hvrt_must_trip
-                    .or(fallback.base.op_mod_hvrt_must_trip),
-                op_mod_lfrt_may_trip: self
-                    .base
-                    .op_mod_lfrt_may_trip
-                    .or(fallback.base.op_mod_lfrt_may_trip),
-                op_mod_lfrt_must_trip: self
-                    .base
-                    .op_mod_lfrt_must_trip
-                    .or(fallback.base.op_mod_lfrt_must_trip),
-                op_mod_lvrt_may_trip: self
-                    .base
-                    .op_mod_lvrt_may_trip
-                    .or(fallback.base.op_mod_lvrt_may_trip),
-                op_mod_lvrt_momentary_cessation: self
-                    .base
-                    .op_mod_lvrt_momentary_cessation
-                    .or(fallback.base.op_mod_lvrt_momentary_cessation),
-                op_mod_lvrt_must_trip: self
-                    .base
-                    .op_mod_lvrt_must_trip
-                    .or(fallback.base.op_mod_lvrt_must_trip),
-                op_mod_max_lim_w: self
-                    .base
-                    .op_mod_max_lim_w
-                    .or(fallback.base.op_mod_max_lim_w),
-                op_mod_target_var: self
-                    .base
-                    .op_mod_target_var
-                    .or(fallback.base.op_mod_target_var),
-                op_mod_target_w: self.base.op_mod_target_w.or(fallback.base.op_mod_target_w),
-                op_mod_volt_var: self.base.op_mod_volt_var.or(fallback.base.op_mod_volt_var),
-                op_mod_volt_watt: self
-                    .base
-                    .op_mod_volt_watt
-                    .or(fallback.base.op_mod_volt_watt),
-                op_mod_watt_pf: self.base.op_mod_watt_pf.or(fallback.base.op_mod_watt_pf),
-                op_mod_watt_var: self.base.op_mod_watt_var.or(fallback.base.op_mod_watt_var),
-                ramp_tms: self.base.ramp_tms.or(fallback.base.ramp_tms),
-                op_mod_imp_lim_w: self
-                    .base
-                    .op_mod_imp_lim_w
-                    .or(fallback.base.op_mod_imp_lim_w),
-                op_mod_exp_lim_w: self
-                    .base
-                    .op_mod_exp_lim_w
-                    .or(fallback.base.op_mod_exp_lim_w),
-                op_mod_gen_lim_w: self
-                    .base
-                    .op_mod_gen_lim_w
-                    .or(fallback.base.op_mod_gen_lim_w),
-                op_mod_load_lim_w: self
-                    .base
-                    .op_mod_load_lim_w
-                    .or(fallback.base.op_mod_load_lim_w),
-            },
+            op_mod_connect: self.op_mod_connect.or(fallback.op_mod_connect),
+            op_mod_energize: self.op_mod_energize.or(fallback.op_mod_energize),
+            op_mod_fixed_pf_absorb_w: self
+                .op_mod_fixed_pf_absorb_w
+                .or(fallback.op_mod_fixed_pf_absorb_w),
+            op_mod_fixed_pf_inject_w: self
+                .op_mod_fixed_pf_inject_w
+                .or(fallback.op_mod_fixed_pf_inject_w),
+            op_mod_fixed_var: self.op_mod_fixed_var.or(fallback.op_mod_fixed_var),
+            op_mod_fixed_w: self.op_mod_fixed_w.or(fallback.op_mod_fixed_w),
+            op_mod_freq_droop: self.op_mod_freq_droop.or(fallback.op_mod_freq_droop),
+            op_mod_freq_watt: self.op_mod_freq_watt.or(fallback.op_mod_freq_watt),
+            op_mod_hfrt_may_trip: self.op_mod_hfrt_may_trip.or(fallback.op_mod_hfrt_may_trip),
+            op_mod_hfrt_must_trip: self
+                .op_mod_hfrt_must_trip
+                .or(fallback.op_mod_hfrt_must_trip),
+            op_mod_hvrt_may_trip: self.op_mod_hvrt_may_trip.or(fallback.op_mod_hvrt_may_trip),
+            op_mod_hvrt_momentary_cessation: self
+                .op_mod_hvrt_momentary_cessation
+                .or(fallback.op_mod_hvrt_momentary_cessation),
+            op_mod_hvrt_must_trip: self
+                .op_mod_hvrt_must_trip
+                .or(fallback.op_mod_hvrt_must_trip),
+            op_mod_lfrt_may_trip: self.op_mod_lfrt_may_trip.or(fallback.op_mod_lfrt_may_trip),
+            op_mod_lfrt_must_trip: self
+                .op_mod_lfrt_must_trip
+                .or(fallback.op_mod_lfrt_must_trip),
+            op_mod_lvrt_may_trip: self.op_mod_lvrt_may_trip.or(fallback.op_mod_lvrt_may_trip),
+            op_mod_lvrt_momentary_cessation: self
+                .op_mod_lvrt_momentary_cessation
+                .or(fallback.op_mod_lvrt_momentary_cessation),
+            op_mod_lvrt_must_trip: self
+                .op_mod_lvrt_must_trip
+                .or(fallback.op_mod_lvrt_must_trip),
+            op_mod_max_lim_w: self.op_mod_max_lim_w.or(fallback.op_mod_max_lim_w),
+            op_mod_target_var: self.op_mod_target_var.or(fallback.op_mod_target_var),
+            op_mod_target_w: self.op_mod_target_w.or(fallback.op_mod_target_w),
+            op_mod_volt_var: self.op_mod_volt_var.or(fallback.op_mod_volt_var),
+            op_mod_volt_watt: self.op_mod_volt_watt.or(fallback.op_mod_volt_watt),
+            op_mod_watt_pf: self.op_mod_watt_pf.or(fallback.op_mod_watt_pf),
+            op_mod_watt_var: self.op_mod_watt_var.or(fallback.op_mod_watt_var),
+            ramp_tms: self.ramp_tms.or(fallback.ramp_tms),
+            op_mod_imp_lim_w: self.op_mod_imp_lim_w.or(fallback.op_mod_imp_lim_w),
+            op_mod_exp_lim_w: self.op_mod_exp_lim_w.or(fallback.op_mod_exp_lim_w),
+            op_mod_gen_lim_w: self.op_mod_gen_lim_w.or(fallback.op_mod_gen_lim_w),
+            op_mod_load_lim_w: self.op_mod_load_lim_w.or(fallback.op_mod_load_lim_w),
             set_es_delay: self.set_es_delay.or(fallback.set_es_delay),
             set_es_high_freq: self.set_es_high_freq.or(fallback.set_es_high_freq),
             set_es_high_volt: self.set_es_high_volt.or(fallback.set_es_high_volt),
@@ -185,11 +168,12 @@ impl ControlAttributes {
     }
 }
 
-impl From<&DefaultDERControl> for ControlAttributes {
-    fn from(value: &DefaultDERControl) -> Self {
+impl ControlAttributes {
+    pub fn from_default_control<F>(value: &DefaultDERControl, curve_lookup: F) -> Self
+    where
+        F: Fn(String) -> Option<DERCurve>,
+    {
         ControlAttributes {
-            base: value.der_control_base.clone(),
-
             set_es_delay: value.set_es_delay,
             set_es_high_freq: value.set_es_high_freq,
             set_es_high_volt: value.set_es_high_volt,
@@ -199,14 +183,83 @@ impl From<&DefaultDERControl> for ControlAttributes {
             set_es_random_delay: value.set_es_random_delay,
             set_grad_w: value.set_grad_w,
             set_soft_grad_w: value.set_soft_grad_w,
+
+            ..ControlAttributes::from_control_base(value.der_control_base.clone(), curve_lookup)
         }
     }
-}
 
-impl From<&DERControl> for ControlAttributes {
-    fn from(value: &DERControl) -> Self {
+    pub fn from_control<F>(value: &DERControl, curve_lookup: F) -> Self
+    where
+        F: Fn(String) -> Option<DERCurve>,
+    {
+        ControlAttributes::from_control_base(value.der_control_base.clone(), curve_lookup)
+    }
+
+    fn from_control_base<F>(value: DERControlBase, curve_lookup: F) -> Self
+    where
+        F: Fn(String) -> Option<DERCurve>,
+    {
         ControlAttributes {
-            base: value.der_control_base.clone(),
+            op_mod_connect: value.op_mod_connect,
+            op_mod_energize: value.op_mod_energize,
+            op_mod_fixed_pf_absorb_w: value.op_mod_fixed_pf_absorb_w,
+            op_mod_fixed_pf_inject_w: value.op_mod_fixed_pf_inject_w,
+            op_mod_fixed_var: value.op_mod_fixed_var,
+            op_mod_fixed_w: value.op_mod_fixed_w,
+            op_mod_freq_droop: value.op_mod_freq_droop,
+            op_mod_freq_watt: value
+                .op_mod_freq_watt
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_hfrt_may_trip: value
+                .op_mod_hfrt_may_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_hfrt_must_trip: value
+                .op_mod_hfrt_must_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_hvrt_may_trip: value
+                .op_mod_hvrt_may_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_hvrt_momentary_cessation: value
+                .op_mod_hvrt_momentary_cessation
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_hvrt_must_trip: value
+                .op_mod_hvrt_must_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_lfrt_may_trip: value
+                .op_mod_lfrt_may_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_lfrt_must_trip: value
+                .op_mod_lfrt_must_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_lvrt_may_trip: value
+                .op_mod_lvrt_may_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_lvrt_momentary_cessation: value
+                .op_mod_lvrt_momentary_cessation
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_lvrt_must_trip: value
+                .op_mod_lvrt_must_trip
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_max_lim_w: value.op_mod_max_lim_w,
+            op_mod_target_var: value.op_mod_target_var,
+            op_mod_target_w: value.op_mod_target_w,
+            op_mod_volt_var: value
+                .op_mod_volt_var
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_volt_watt: value
+                .op_mod_volt_watt
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_watt_pf: value
+                .op_mod_watt_pf
+                .and_then(|link| curve_lookup(link.href)),
+            op_mod_watt_var: value
+                .op_mod_watt_var
+                .and_then(|link| curve_lookup(link.href)),
+            ramp_tms: value.ramp_tms,
+            op_mod_imp_lim_w: value.op_mod_imp_lim_w,
+            op_mod_exp_lim_w: value.op_mod_exp_lim_w,
+            op_mod_gen_lim_w: value.op_mod_gen_lim_w,
+            op_mod_load_lim_w: value.op_mod_load_lim_w,
 
             // All of the DefaultDERControl-specific options are None
             ..ControlAttributes::default()
@@ -254,102 +307,97 @@ mod tests {
                     grad_w,
                     soft_grad_w,
                 )| {
-                    let mut base = DERControlBase::default();
+                    let mut ca = ControlAttributes::default();
                     if base_flags[0] {
-                        base.op_mod_connect = Some(Default::default());
+                        ca.op_mod_connect = Some(Default::default());
                     }
                     if base_flags[1] {
-                        base.op_mod_energize = Some(Default::default());
+                        ca.op_mod_energize = Some(Default::default());
                     }
                     if base_flags[2] {
-                        base.op_mod_fixed_pf_absorb_w = Some(Default::default());
+                        ca.op_mod_fixed_pf_absorb_w = Some(Default::default());
                     }
                     if base_flags[3] {
-                        base.op_mod_fixed_pf_inject_w = Some(Default::default());
+                        ca.op_mod_fixed_pf_inject_w = Some(Default::default());
                     }
                     if base_flags[4] {
-                        base.op_mod_fixed_var = Some(Default::default());
+                        ca.op_mod_fixed_var = Some(Default::default());
                     }
                     if base_flags[5] {
-                        base.op_mod_fixed_w = Some(Default::default());
+                        ca.op_mod_fixed_w = Some(Default::default());
                     }
                     if base_flags[6] {
-                        base.op_mod_freq_droop = Some(Default::default());
+                        ca.op_mod_freq_droop = Some(Default::default());
                     }
                     if base_flags[7] {
-                        base.op_mod_freq_watt = Some(Default::default());
+                        ca.op_mod_freq_watt = Some(Default::default());
                     }
                     if base_flags[8] {
-                        base.op_mod_hfrt_may_trip = Some(Default::default());
+                        ca.op_mod_hfrt_may_trip = Some(Default::default());
                     }
                     if base_flags[9] {
-                        base.op_mod_hfrt_must_trip = Some(Default::default());
+                        ca.op_mod_hfrt_must_trip = Some(Default::default());
                     }
                     if base_flags[10] {
-                        base.op_mod_hvrt_may_trip = Some(Default::default());
+                        ca.op_mod_hvrt_may_trip = Some(Default::default());
                     }
                     if base_flags[11] {
-                        base.op_mod_hvrt_momentary_cessation = Some(Default::default());
+                        ca.op_mod_hvrt_momentary_cessation = Some(Default::default());
                     }
                     if base_flags[12] {
-                        base.op_mod_hvrt_must_trip = Some(Default::default());
+                        ca.op_mod_hvrt_must_trip = Some(Default::default());
                     }
                     if base_flags[13] {
-                        base.op_mod_lfrt_may_trip = Some(Default::default());
+                        ca.op_mod_lfrt_may_trip = Some(Default::default());
                     }
                     if base_flags[14] {
-                        base.op_mod_lfrt_must_trip = Some(Default::default());
+                        ca.op_mod_lfrt_must_trip = Some(Default::default());
                     }
                     if base_flags[15] {
-                        base.op_mod_lvrt_may_trip = Some(Default::default());
+                        ca.op_mod_lvrt_may_trip = Some(Default::default());
                     }
                     if base_flags[16] {
-                        base.op_mod_lvrt_momentary_cessation = Some(Default::default());
+                        ca.op_mod_lvrt_momentary_cessation = Some(Default::default());
                     }
                     if base_flags[17] {
-                        base.op_mod_lvrt_must_trip = Some(Default::default());
+                        ca.op_mod_lvrt_must_trip = Some(Default::default());
                     }
                     if base_flags[18] {
-                        base.op_mod_max_lim_w = Some(Default::default());
+                        ca.op_mod_max_lim_w = Some(Default::default());
                     }
                     if base_flags[19] {
-                        base.op_mod_target_var = Some(Default::default());
+                        ca.op_mod_target_var = Some(Default::default());
                     }
                     if base_flags[20] {
-                        base.op_mod_target_w = Some(Default::default());
+                        ca.op_mod_target_w = Some(Default::default());
                     }
                     if base_flags[21] {
-                        base.op_mod_volt_var = Some(Default::default());
+                        ca.op_mod_volt_var = Some(Default::default());
                     }
                     if base_flags[22] {
-                        base.op_mod_volt_watt = Some(Default::default());
+                        ca.op_mod_volt_watt = Some(Default::default());
                     }
                     if base_flags[23] {
-                        base.op_mod_watt_pf = Some(Default::default());
+                        ca.op_mod_watt_pf = Some(Default::default());
                     }
                     if base_flags[24] {
-                        base.op_mod_watt_var = Some(Default::default());
+                        ca.op_mod_watt_var = Some(Default::default());
                     }
                     if base_flags[25] {
-                        base.ramp_tms = Some(Default::default());
+                        ca.ramp_tms = Some(Default::default());
                     }
                     if base_flags[26] {
-                        base.op_mod_imp_lim_w = Some(Default::default());
+                        ca.op_mod_imp_lim_w = Some(Default::default());
                     }
                     if base_flags[27] {
-                        base.op_mod_exp_lim_w = Some(Default::default());
+                        ca.op_mod_exp_lim_w = Some(Default::default());
                     }
                     if base_flags[28] {
-                        base.op_mod_gen_lim_w = Some(Default::default());
+                        ca.op_mod_gen_lim_w = Some(Default::default());
                     }
                     if base_flags[29] {
-                        base.op_mod_load_lim_w = Some(Default::default());
+                        ca.op_mod_load_lim_w = Some(Default::default());
                     }
-
-                    let mut ca = ControlAttributes {
-                        base,
-                        ..Default::default()
-                    };
 
                     if ca_flags[0] {
                         ca.set_es_delay = Some(Uint32(es_delay));
@@ -406,7 +454,7 @@ mod tests {
         #[test]
         fn test_overlay_precedence(ca2 in arb_control_attributes()) {
             // Construct a ControlAttributes where all fields are Some
-            let base = DERControlBase {
+            let ca1 = ControlAttributes {
                 op_mod_connect: Some(Default::default()),
                 op_mod_energize: Some(Default::default()),
                 op_mod_fixed_pf_absorb_w: Some(Default::default()),
@@ -437,10 +485,7 @@ mod tests {
                 op_mod_exp_lim_w: Some(Default::default()),
                 op_mod_gen_lim_w: Some(Default::default()),
                 op_mod_load_lim_w: Some(Default::default()),
-            };
 
-            let ca1 = ControlAttributes {
-                base,
                 set_es_delay: Some(Uint32(1)),
                 set_es_high_freq: Some(Uint16(2)),
                 set_es_high_volt: Some(Int16(3)),
@@ -475,8 +520,9 @@ mod tests {
         dderc.set_es_delay = Some(Uint32(100));
         dderc.set_grad_w = Some(Uint16(200));
 
-        let ca = ControlAttributes::from(&dderc);
-        assert_eq!(ca.base.op_mod_connect, Some(Default::default()));
+        let curve_lookup = |_href| None;
+        let ca = ControlAttributes::from_default_control(&dderc, curve_lookup);
+        assert_eq!(ca.op_mod_connect, Some(Default::default()));
         assert_eq!(ca.set_es_delay, Some(Uint32(100)));
         assert_eq!(ca.set_grad_w, Some(Uint16(200)));
         assert_eq!(ca.set_es_high_freq, None);
@@ -487,8 +533,9 @@ mod tests {
         let mut derc = DERControl::default();
         derc.der_control_base.op_mod_energize = Some(Default::default());
 
-        let ca = ControlAttributes::from(&derc);
-        assert_eq!(ca.base.op_mod_energize, Some(Default::default()));
+        let curve_lookup = |_href| None;
+        let ca = ControlAttributes::from_control(&derc, curve_lookup);
+        assert_eq!(ca.op_mod_energize, Some(Default::default()));
         assert_eq!(ca.set_es_delay, None);
         assert_eq!(ca.set_grad_w, None);
     }

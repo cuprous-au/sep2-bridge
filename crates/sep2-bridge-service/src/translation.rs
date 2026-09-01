@@ -5,13 +5,13 @@ use derive_more::Display;
 use sep2_common::packages::{
     der::{
         ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
-        DERCapability, DERControlType, DERSettings, DERStatus, FreqDroopType,
+        DERCapability, DERControlType, DERCurve, DERSettings, DERStatus, FreqDroopType,
         OperationalModeStatusType, OperationalModeStatusValue, PowerFactor, ReactivePower,
         ReactiveSusceptance, StateOfChargeStatusType, VoltageRMS,
     },
     metering::{Reading, ReadingType},
     metering_mirror::MirrorMeterReading,
-    primitives::{Int16, Int48, Int64, String32, Uint16, Uint32},
+    primitives::{Int16, Int32, Int48, Int64, String32, Uint16, Uint32},
     types::{
         AccumulationBehaviourType, CommodityType, DateTimeInterval, FlowDirectionType, KindType,
         Percent, PhaseCode, PowerOfTenMultiplierType, SignedPercent, UomType,
@@ -23,8 +23,8 @@ use sunspec::models::{model701, model702::CtrlModes, model703, model704};
 use crate::{
     ScaledValue,
     modbus_connection::{
-        Capabilities as ModbusCapabilities, Metering as ModbusMetering, Model711Ctl,
-        Parameters as ModbusParameters, PhaseReference, Settings as ModbusSettings,
+        Capabilities as ModbusCapabilities, Curve as ModbusCurve, Metering as ModbusMetering,
+        Model711Ctl, Parameters as ModbusParameters, PhaseReference, Settings as ModbusSettings,
         Status as ModbusStatus, VoltageWithReference,
     },
     scheduler::ControlAttributes,
@@ -298,11 +298,49 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
 
     fn try_from(attrs: ControlAttributes) -> Result<ModbusParameters> {
         Ok(ModbusParameters {
+            // AS5438 - Table F.6 to E.6
+            der_volt_watt: attrs
+                .op_mod_volt_watt
+                .clone()
+                .try_convert()
+                .map_err(|err| err.name("der_volt_watt"))?,
+            der_volt_watt_tms: attrs
+                .op_mod_volt_watt
+                .and_then(|curve_data| curve_data.open_loop_tms.convert()),
+
+            // AS5438 - Table F.7 to E.7
+            der_trip_lv_must: attrs
+                .op_mod_lvrt_must_trip
+                .try_convert()
+                .map_err(|err| err.name("der_trip_lv_must"))?,
+            der_trip_lv_mom_cess: attrs
+                .op_mod_lvrt_momentary_cessation
+                .try_convert()
+                .map_err(|err| err.name("der_trip_lv_mom_cess"))?,
+            der_trip_hv_must: attrs
+                .op_mod_hvrt_must_trip
+                .try_convert()
+                .map_err(|err| err.name("der_trip_hv_must"))?,
+            der_trip_hv_mom_cess: attrs
+                .op_mod_hvrt_momentary_cessation
+                .try_convert()
+                .map_err(|err| err.name("der_trip_hv_mom_cess"))?,
+
+            // AS5438 - Table F.8 to E.8
+            der_trip_lf: attrs
+                .op_mod_lfrt_must_trip
+                .try_convert()
+                .map_err(|err| err.name("der_trip_lf"))?,
+            der_trip_hf: attrs
+                .op_mod_hfrt_must_trip
+                .try_convert()
+                .map_err(|err| err.name("der_trip_hf"))?,
+
             // AS5438 - Table F.9 to E.9
-            droop_ctl: attrs.base.op_mod_freq_droop.convert(),
+            droop_ctl: attrs.op_mod_freq_droop.convert(),
 
             // AS5438 - Table F.10 to E.10
-            es: attrs.base.op_mod_connect.convert(),
+            es: attrs.op_mod_connect.convert(),
             esv_hi: attrs
                 .set_es_high_volt
                 .try_convert()
@@ -326,27 +364,24 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
             es_rmp_tms: attrs.set_es_ramp_tms.convert().map(es_time_to_seconds),
 
             // AS5438 - Table F.11 to E.11
-            w_max_lim_pct_ena: attrs.base.op_mod_max_lim_w.is_some().convert(),
+            w_max_lim_pct_ena: attrs.op_mod_max_lim_w.is_some().convert(),
             w_max_lim_pct: attrs
-                .base
                 .op_mod_max_lim_w
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
 
             // AS5438 - Table F.12 to E.12
-            w_set_ena: (attrs.base.op_mod_fixed_w.is_some()
-                || attrs.base.op_mod_target_w.is_some())
-            .convert(),
+            w_set_ena: (attrs.op_mod_fixed_w.is_some() || attrs.op_mod_target_w.is_some())
+                .convert(),
             w_set_pct: attrs
-                .base
                 .op_mod_fixed_w
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            w_set: attrs.base.op_mod_target_w.clone().convert(),
+            w_set: attrs.op_mod_target_w.clone().convert(),
             // Also set WSetMod conditionally. If both WSet and WSetPct are
             // available this is likely a mistake from upstream, however default
             // to WSetPct as that is the specified in the AS5438 spec.
-            w_set_mod: match (attrs.base.op_mod_fixed_w, attrs.base.op_mod_target_w) {
+            w_set_mod: match (attrs.op_mod_fixed_w, attrs.op_mod_target_w) {
                 (None, None) => None,
                 (Some(_), None) => Some(model704::WSetMod::WMaxPct),
                 (None, Some(_)) => Some(model704::WSetMod::Watts),
@@ -631,6 +666,28 @@ impl TryConvert<u16> for Int16 {
     }
 }
 
+impl TryConvert<u32> for Int32 {
+    fn try_convert(self: Int32) -> ResultUnnamed<u32> {
+        // Raise errors on negative values.
+        u32::try_from(self.0).map_err(|_| Error::UnsignedNegative)
+    }
+}
+
+impl TryConvert<u16> for Int32 {
+    fn try_convert(self: Int32) -> ResultUnnamed<u16> {
+        u16::try_from(self.0).map_err(|_| match self {
+            _ if self.0 < 0 => Error::UnsignedNegative,
+            _ => Error::SignedOverflow,
+        })
+    }
+}
+
+impl TryConvert<i16> for Int32 {
+    fn try_convert(self: Int32) -> ResultUnnamed<i16> {
+        i16::try_from(self.0).map_err(|_| Error::SignedOverflow)
+    }
+}
+
 impl Convert<u32> for Uint16 {
     fn convert(self: Uint16) -> u32 {
         u32::from(self.0)
@@ -729,11 +786,30 @@ impl Convert<i16> for PowerOfTenMultiplierType {
     }
 }
 
+impl<TX, TY> TryConvert<ModbusCurve<TX, TY>> for DERCurve
+where
+    Int32: TryConvert<TX>,
+    Int32: TryConvert<TY>,
+{
+    fn try_convert(self: DERCurve) -> ResultUnnamed<ModbusCurve<TX, TY>> {
+        // FIXME: We might have to consider other properties of DERCurve::x and also CurveData::excitation
+        Ok(ModbusCurve {
+            points: self
+                .curve_data
+                .iter()
+                .map(|point| Ok((point.xvalue.try_convert()?, point.yvalue.try_convert()?)))
+                .collect::<ResultUnnamed<Vec<_>>>()?,
+            sf_x: self.x_multiplier.convert(),
+            sf_y: self.y_multiplier.convert(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use sep2_common::packages::{der::DERControlBase, primitives::Uint32};
+    use sep2_common::packages::primitives::Uint32;
 
     proptest! {
         #[test]
@@ -923,10 +999,7 @@ mod tests {
     #[test]
     fn parameters() {
         let parameters = ControlAttributes {
-            base: DERControlBase {
-                op_mod_connect: Some(true),
-                ..Default::default()
-            },
+            op_mod_connect: Some(true),
             set_es_delay: Some(Uint32(42)),
             ..Default::default()
         };
@@ -940,11 +1013,8 @@ mod tests {
     #[test]
     fn parameters_carry_sep2_scale_factors() {
         let parameters = ControlAttributes {
-            base: DERControlBase {
-                op_mod_max_lim_w: Some(Percent::new(8000).expect("Invalid percent")),
-                op_mod_fixed_w: Some(SignedPercent::new(-2500).expect("Invalid percent")),
-                ..Default::default()
-            },
+            op_mod_max_lim_w: Some(Percent::new(8000).expect("Invalid percent")),
+            op_mod_fixed_w: Some(SignedPercent::new(-2500).expect("Invalid percent")),
             // 24.50% and 20.00% of nominal voltage.
             set_es_high_volt: Some(Int16(2450)),
             set_es_low_volt: Some(Int16(2000)),

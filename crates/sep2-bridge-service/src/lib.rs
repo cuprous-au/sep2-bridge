@@ -39,6 +39,8 @@ pub enum ResourceKind {
     DefaultDERControl,
     DERControlList,
     DERControl,
+    DERCurveList,
+    DERCurve,
 }
 
 pub fn deactivated_broadcast<T>(

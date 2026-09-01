@@ -14,22 +14,22 @@ use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::{
     packages::{
         der::{
-            DERControl, DERControlBase, DERControlList, DERProgram, DERProgramList,
-            DefaultDERControl, FreqDroopType,
+            CurveData, DERControl, DERControlBase, DERControlList, DERCurve, DERCurveList,
+            DERProgram, DERProgramList, DefaultDERControl, FreqDroopType,
         },
         fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
         identification::{Link, ListLink},
-        primitives::{HexBinary160, Int16, Int64, Uint16, Uint32},
+        primitives::{HexBinary160, Int16, Int32, Int64, Uint16, Uint32},
         types::{
-            DateTimeInterval, DeviceCategoryType, MRIDType, Percent, PrimacyType, SFDIType,
-            SignedPercent,
+            DateTimeInterval, DeviceCategoryType, MRIDType, Percent, PowerOfTenMultiplierType,
+            PrimacyType, SFDIType, SignedPercent,
         },
     },
     traits::SEType,
 };
 use sunspec::{
-    Value,
-    models::{model703, model704, model711},
+    Group, Value,
+    models::{model703, model704, model706, model707, model708, model709, model710, model711},
 };
 use tokio::{
     sync::mpsc,
@@ -57,14 +57,58 @@ const HREF_DERP: &str = "/edev/1/derp/1";
 const HREF_DDERC: &str = "/edev/1/derp/1/dderc";
 const HREF_DERCL: &str = "/edev/1/derp/1/derc";
 const HREF_DERC_1: &str = "/edev/1/derp/1/derc/1";
+const HREF_CURVEL: &str = "/edev/1/derp/1/dc";
+const HREF_LFRT_MUST_TRIP_CURVE: &str = "/dc/1";
+const HREF_HFRT_MUST_TRIP_CURVE: &str = "/dc/2";
+const HREF_LVRT_MUST_TRIP_CURVE: &str = "/dc/3";
+const HREF_LVRT_MOM_CESS_CURVE: &str = "/dc/4";
+const HREF_HVRT_MUST_TRIP_CURVE: &str = "/dc/5";
+const HREF_HVRT_MOM_CESS_CURVE: &str = "/dc/6";
+const HREF_VOLT_WATT_CURVE: &str = "/dc/7";
 
 // The values to be mocked and verified. Table numbers from AS5438.
 //
 // SEP2 fixes the scale of each value it carries, while the device advertises
-// its own scale factor per group of registers. The mock deliberately uses
-// scale factors that differ from SEP2's (see `add_model_703`, `add_model_704`
-// and `add_model_711` in the mock), so each expectation below is the SEP2 value
+// its own scale factor per group of registers. The mock deliberately uses scale
+// factors that differ from SEP2's, so each expectation below is the SEP2 value
 // restated at the device's scale.
+
+// Values for all tables
+const EXPECTED_ADPT_CRV_REQ: u16 = 2;
+
+// Table 6.
+const OP_MOD_VOLT_WATT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_VOLT_WATT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_VOLT_WATT_DATA: &[(i32, i32)] = &[(23, 24), (25, 26)];
+const OP_MOD_VOLT_WATT_TMS: u16 = 27;
+const EXPECTED_DER_VOLT_WATT_DATA: &[(u16, i16)] = &[(2300, 240), (2500, 260)];
+const EXPECTED_DER_VOLT_WATT_TMS: u32 = 27;
+
+// Table 7.
+const OP_MOD_LVRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_LVRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_LVRT_MUST_DATA: &[(i32, i32)] = &[(7, 8), (9, 10)];
+const EXPECTED_DER_TRIP_LV_MUST_DATA: &[(u16, u32)] = &[(700, 80), (900, 100)];
+const OP_MOD_LVRT_MOM_CESS_DATA: &[(i32, i32)] = &[(11, 12), (13, 14)];
+const EXPECTED_DER_TRIP_LV_MOM_CESS_DATA: &[(u16, u32)] = &[(1100, 120), (1300, 140)];
+
+const OP_MOD_HVRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_HVRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_HVRT_MUST_DATA: &[(i32, i32)] = &[(15, 16), (17, 18)];
+const EXPECTED_DER_TRIP_HV_MUST_DATA: &[(u16, u32)] = &[(1500, 160), (1700, 180)];
+const OP_MOD_HVRT_MOM_CESS_DATA: &[(i32, i32)] = &[(19, 20), (21, 22)];
+const EXPECTED_DER_TRIP_HV_MOM_CESS_DATA: &[(u16, u32)] = &[(1900, 200), (2100, 220)];
+
+// Table 8.
+const OP_MOD_LFRT_DATA: &[(i32, i32)] = &[(1, 1), (2, 3)];
+const OP_MOD_LFRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_LFRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const EXPECTED_DER_TRIP_LF_DATA: &[(u32, u32)] = &[(100, 10), (200, 30)];
+
+const OP_MOD_HFRT_DATA: &[(i32, i32)] = &[(40, 400), (50, 600)];
+const OP_MOD_HFRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::None;
+const OP_MOD_HFRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Deci;
+const EXPECTED_DER_TRIP_HF_DATA: &[(u32, u32)] = &[(4, 0), (5, 1)];
 
 // Table 9. frequency droop values are thousandths in SEP2, except for the time
 // which is hundredths of a second.
@@ -193,6 +237,106 @@ async fn applies_as5438_table_9() {
     .await;
 }
 
+/// Tests that an active DERControl's opModLFRTMustTrip and opModHFRTMustTrip
+/// reach models 709 and 710.
+/// (AS5438 - Table 8)
+#[tokio::test]
+async fn applies_as5438_table_8() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    // LFRT
+    // The requested curve should have been updated.
+    assert_register(&mock, "model709::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    // And the curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model709::Crv_1_ActPt",
+        EXPECTED_DER_TRIP_LF_DATA,
+        model709::Crv::LEN,
+    )
+    .await;
+
+    // HFRT
+    // The requested curve should have been updated.
+    assert_register(&mock, "model710::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    // And the curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model710::Crv_1_ActPt",
+        EXPECTED_DER_TRIP_HF_DATA,
+        model710::Crv::LEN,
+    )
+    .await;
+}
+
+/// Tests that an active DERControl's opModLVRTMustTrip, opModLVRTMomCess,
+/// opModHVRTMustTrip and opModHVRTMomCess reach models 707 and 708.
+/// (AS5438 - Table 7)
+#[tokio::test]
+async fn applies_as5438_table_7() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    // LVRT
+    // The requested curve should have been updated.
+    assert_register(&mock, "model707::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    // And the MustTrip curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model707::Crv_1_MustTrip",
+        EXPECTED_DER_TRIP_LV_MUST_DATA,
+        model707::Crv::LEN,
+    )
+    .await;
+    // And the MomCess curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model707::Crv_1_MomCess",
+        EXPECTED_DER_TRIP_LV_MOM_CESS_DATA,
+        model707::Crv::LEN,
+    )
+    .await;
+
+    // HVRT
+    // The requested curve should have been updated.
+    assert_register(&mock, "model708::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    // And the MustTrip curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model708::Crv_1_MustTrip",
+        EXPECTED_DER_TRIP_HV_MUST_DATA,
+        model708::Crv::LEN,
+    )
+    .await;
+    // And the MomCess curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model708::Crv_1_MomCess",
+        EXPECTED_DER_TRIP_HV_MOM_CESS_DATA,
+        model708::Crv::LEN,
+    )
+    .await;
+}
+
+/// Tests that an active DERControl's opModVoltWatt reaches models 706 and 708.
+/// (AS5438 - Table 6)
+#[tokio::test]
+async fn applies_as5438_table_6() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    // The requested curve should have been updated.
+    assert_register(&mock, "model706::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    // And the TMS is filled
+    assert_register(&mock, "model706::Crv_1_RspTms", EXPECTED_DER_VOLT_WATT_TMS).await;
+    // And the curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model706::Crv_1_ActPt",
+        EXPECTED_DER_VOLT_WATT_DATA,
+        model706::Crv::LEN,
+    )
+    .await;
+}
+
 /////
 // Helpers
 
@@ -218,6 +362,42 @@ where
         actual, expected,
         "register {name} never reached the expected value"
     );
+}
+
+/// Checks a series of registers to validate the assignment of curve data.
+///
+/// Note that this doesn't keep polling the registers unlike assert_register, as it
+/// assumes all data has been set prior. This is reasonable as a curve will
+/// require an AdptCrvReq to be set last by the client and this should be polled
+/// before querying for the curve data, much like the behaviour of a real
+/// device.
+async fn assert_curve_data<TX, TY>(
+    mock: &SunSpecMock,
+    name: &str,
+    expected: &[(TX, TY)],
+    curve_static_len: u16,
+) where
+    TX: Value + PartialEq + std::fmt::Debug,
+    TY: Value + PartialEq + std::fmt::Debug,
+{
+    let mut addr = mock.get_name_addr(name);
+
+    // First the active point count
+    let actual = mock.get_value_at_addr::<u16>(addr, 1);
+    assert_eq!(usize::from(actual), expected.len());
+    addr += usize::from(curve_static_len);
+
+    // Then each pair of data points.
+    let x_size = std::mem::size_of::<TX>() / 2;
+    let y_size = std::mem::size_of::<TY>() / 2;
+    for (x, y) in expected.iter() {
+        let actual_x = mock.get_value_at_addr::<TX>(addr, x_size);
+        assert_eq!(&actual_x, x);
+        addr += x_size;
+        let actual_y = mock.get_value_at_addr::<TY>(addr, y_size);
+        assert_eq!(&actual_y, y);
+        addr += y_size;
+    }
 }
 
 fn mock_lfdi() -> HexBinary160 {
@@ -441,6 +621,10 @@ async fn setup_control_mocks(mock: &MockServer) {
                     href: HREF_DERCL.into(),
                     ..Default::default()
                 }),
+                der_curve_list_link: Some(ListLink {
+                    href: HREF_CURVEL.into(),
+                    ..Default::default()
+                }),
 
                 mrid: MRIDType(123),
 
@@ -492,6 +676,27 @@ async fn setup_control_mocks(mock: &MockServer) {
                 k_uf: Uint16(DROOP_K_UF),
                 open_loop_tms: Uint16(DROOP_OPEN_LOOP_TMS),
             }),
+            op_mod_lfrt_must_trip: Some(Link {
+                href: HREF_LFRT_MUST_TRIP_CURVE.into(),
+            }),
+            op_mod_hfrt_must_trip: Some(Link {
+                href: HREF_HFRT_MUST_TRIP_CURVE.into(),
+            }),
+            op_mod_lvrt_must_trip: Some(Link {
+                href: HREF_LVRT_MUST_TRIP_CURVE.into(),
+            }),
+            op_mod_lvrt_momentary_cessation: Some(Link {
+                href: HREF_LVRT_MOM_CESS_CURVE.into(),
+            }),
+            op_mod_hvrt_must_trip: Some(Link {
+                href: HREF_HVRT_MUST_TRIP_CURVE.into(),
+            }),
+            op_mod_hvrt_momentary_cessation: Some(Link {
+                href: HREF_HVRT_MOM_CESS_CURVE.into(),
+            }),
+            op_mod_volt_watt: Some(Link {
+                href: HREF_VOLT_WATT_CURVE.into(),
+            }),
             ..Default::default()
         },
 
@@ -513,6 +718,146 @@ async fn setup_control_mocks(mock: &MockServer) {
             results: Uint32(1),
 
             ..Default::default()
+        },
+    )
+    .await;
+
+    let lfrt_must_trip_curve = DERCurve {
+        href: Some(HREF_LFRT_MUST_TRIP_CURVE.into()),
+        mrid: MRIDType(1001),
+
+        curve_data: OP_MOD_LFRT_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_LFRT_SF_X,
+        y_multiplier: OP_MOD_LFRT_SF_Y,
+        ..Default::default()
+    };
+    let hfrt_must_trip_curve = DERCurve {
+        href: Some(HREF_HFRT_MUST_TRIP_CURVE.into()),
+        mrid: MRIDType(1002),
+
+        curve_data: OP_MOD_HFRT_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_HFRT_SF_X,
+        y_multiplier: OP_MOD_HFRT_SF_Y,
+        ..Default::default()
+    };
+
+    let lvrt_must_trip_curve = DERCurve {
+        href: Some(HREF_LVRT_MUST_TRIP_CURVE.into()),
+        mrid: MRIDType(1003),
+
+        curve_data: OP_MOD_LVRT_MUST_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_LVRT_SF_X,
+        y_multiplier: OP_MOD_LVRT_SF_Y,
+        ..Default::default()
+    };
+
+    let lvrt_mom_cess_curve = DERCurve {
+        href: Some(HREF_LVRT_MOM_CESS_CURVE.into()),
+        mrid: MRIDType(1004),
+
+        curve_data: OP_MOD_LVRT_MOM_CESS_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_LVRT_SF_X,
+        y_multiplier: OP_MOD_LVRT_SF_Y,
+        ..Default::default()
+    };
+
+    let hvrt_must_trip_curve = DERCurve {
+        href: Some(HREF_HVRT_MUST_TRIP_CURVE.into()),
+        mrid: MRIDType(1005),
+
+        curve_data: OP_MOD_HVRT_MUST_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_HVRT_SF_X,
+        y_multiplier: OP_MOD_HVRT_SF_Y,
+        ..Default::default()
+    };
+
+    let hvrt_mom_cess_curve = DERCurve {
+        href: Some(HREF_HVRT_MOM_CESS_CURVE.into()),
+        mrid: MRIDType(1006),
+
+        curve_data: OP_MOD_HVRT_MOM_CESS_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_HVRT_SF_X,
+        y_multiplier: OP_MOD_HVRT_SF_Y,
+        ..Default::default()
+    };
+
+    let volt_watt_curve = DERCurve {
+        href: Some(HREF_VOLT_WATT_CURVE.into()),
+        mrid: MRIDType(1007),
+
+        curve_data: OP_MOD_VOLT_WATT_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_VOLT_WATT_SF_X,
+        y_multiplier: OP_MOD_VOLT_WATT_SF_Y,
+        open_loop_tms: Some(Uint16(OP_MOD_VOLT_WATT_TMS)),
+        ..Default::default()
+    };
+
+    mock_resource(
+        mock,
+        HREF_CURVEL,
+        &DERCurveList {
+            href: Some(HREF_CURVEL.into()),
+            der_curve: vec![
+                lfrt_must_trip_curve,
+                hfrt_must_trip_curve,
+                lvrt_must_trip_curve,
+                lvrt_mom_cess_curve,
+                hvrt_must_trip_curve,
+                hvrt_mom_cess_curve,
+                volt_watt_curve,
+            ],
+
+            all: Uint32(6),
+            results: Uint32(6),
         },
     )
     .await;
