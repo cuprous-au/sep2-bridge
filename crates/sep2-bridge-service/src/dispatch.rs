@@ -3,7 +3,6 @@ use chrono::Utc;
 use sep2_common::packages::primitives::Int64;
 use tokio::sync::mpsc::Sender as MpscSender;
 
-use crate::translation::TryConvert;
 use crate::{
     Error, Result, modbus_connection, scheduler,
     sep2_connection::{self, ControlResponse, Sep2ResourceEvent},
@@ -75,7 +74,7 @@ pub async fn control_change_dispatcher(
     while let Ok(event) = scheduler_output.recv().await {
         match event {
             scheduler::Event::ParametersChanged(control_attributes) => {
-                match (*control_attributes).clone().try_convert() {
+                match (*control_attributes).clone().try_into() {
                     Ok(modbus_parameters) => {
                         modbus_input
                             .send(modbus_connection::Command::UpdateParameters(
@@ -111,7 +110,7 @@ pub async fn sep2_device_state_dispatcher(
             // Note: for each of these, we can potentially fail conversion from
             // modbus to SEP2 translation. In that case, we log a warning and do
             // not pass the message along but continue otherwise.
-            modbus_connection::Event::CapabilitiesPolled(cap) => match cap.try_convert() {
+            modbus_connection::Event::CapabilitiesPolled(cap) => match cap.try_into() {
                 Ok(der_capability) => {
                     sep2_conn_input
                         .send(sep2_connection::Command::SendDeviceCapability(
@@ -128,7 +127,7 @@ pub async fn sep2_device_state_dispatcher(
             },
             modbus_connection::Event::StatePolled(status, settings, metering) => {
                 if let Some(status) = status {
-                    match status.try_convert() {
+                    match status.try_into() {
                         Ok(der_status) => {
                             sep2_conn_input
                                 .send(sep2_connection::Command::SendDeviceStatus(der_status))
@@ -143,7 +142,7 @@ pub async fn sep2_device_state_dispatcher(
                     }
                 }
                 if let Some(settings) = settings {
-                    match settings.try_convert() {
+                    match settings.try_into() {
                         Ok(der_settings) => {
                             sep2_conn_input
                                 .send(sep2_connection::Command::SendDeviceSettings(der_settings))
@@ -158,7 +157,7 @@ pub async fn sep2_device_state_dispatcher(
                     }
                 }
                 if let Some(metering) = metering {
-                    match metering.try_convert() {
+                    match metering.try_into() {
                         Ok(meter_readings) => {
                             sep2_conn_input
                                 .send(sep2_connection::Command::SendMeterReadings(meter_readings))

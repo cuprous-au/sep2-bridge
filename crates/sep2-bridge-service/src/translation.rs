@@ -76,83 +76,85 @@ impl Error {
     }
 }
 
-/// The public facing conversion trait.
-pub trait TryConvert<T> {
-    fn try_convert(self) -> Result<T>;
-}
+// The public facing conversions use TryFrom.
+impl TryFrom<ModbusCapabilities> for DERCapability {
+    type Error = NamedError;
 
-impl TryConvert<DERCapability> for ModbusCapabilities {
-    fn try_convert(self: ModbusCapabilities) -> Result<DERCapability> {
+    fn try_from(caps: ModbusCapabilities) -> Result<Self> {
         Ok(DERCapability {
-            rtg_max_w: self
+            rtg_max_w: caps
                 .w_max_rtg
                 .try_convert_mandatory()
                 .map_err(|err| err.name("w_max_rtg"))?,
-            rtg_over_excited_w: self
+            rtg_over_excited_w: caps
                 .w_ovr_ext_rtg
                 .try_convert()
                 .map_err(|err| err.name("rtg_over_excited_w"))?,
-            rtg_over_excited_pf: self.w_ovr_ext_rtg_pf.convert(),
-            rtg_under_excited_w: self
+            rtg_over_excited_pf: caps.w_ovr_ext_rtg_pf.convert(),
+            rtg_under_excited_w: caps
                 .w_und_ext_rtg
                 .try_convert()
                 .map_err(|err| err.name("rtg_under_excited_w"))?,
-            rtg_under_excited_pf: self.w_und_ext_rtg_pf.convert(),
-            rtg_max_va: self.va_max_rtg.convert(),
-            rtg_max_var: self
+            rtg_under_excited_pf: caps.w_und_ext_rtg_pf.convert(),
+            rtg_max_va: caps.va_max_rtg.convert(),
+            rtg_max_var: caps
                 .var_max_inj_rtg
                 .try_convert()
                 .map_err(|err| err.name("var_max_inj_rtg"))?,
-            rtg_max_var_neg: self
+            rtg_max_var_neg: caps
                 .var_max_abs_rtg
                 .try_convert()
                 .map_err(|err| err.name("var_max_abs_rtg"))?,
-            rtg_max_charge_rate_w: self
+            rtg_max_charge_rate_w: caps
                 .w_cha_rte_max_rtg
                 .try_convert()
                 .map_err(|err| err.name("w_cha_rte_max_rtg"))?,
-            rtg_max_charge_rate_va: self.va_cha_rte_max_rtg.convert(),
-            rtg_v_nom: self.v_nom_rtg.convert(),
-            rtg_max_v: self.v_max_rtg.convert(),
-            rtg_min_v: self.v_min_rtg.convert(),
-            modes_supported: self
+            rtg_max_charge_rate_va: caps.va_cha_rte_max_rtg.convert(),
+            rtg_v_nom: caps.v_nom_rtg.convert(),
+            rtg_max_v: caps.v_max_rtg.convert(),
+            rtg_min_v: caps.v_min_rtg.convert(),
+            modes_supported: caps
                 .ctrl_modes
                 .try_convert()
                 .map_err(|err| err.name("modes_supported"))?,
-            rtg_reactive_susceptance: self.react_suscept_rtg.convert(),
+            rtg_reactive_susceptance: caps.react_suscept_rtg.convert(),
             ..Default::default()
         })
     }
 }
 
-impl TryConvert<DERStatus> for ModbusStatus {
-    fn try_convert(self: ModbusStatus) -> Result<DERStatus> {
-        let connect_status = self
+impl TryFrom<ModbusStatus> for DERStatus {
+    type Error = NamedError;
+
+    fn try_from(status: ModbusStatus) -> Result<DERStatus> {
+        let connect_status = status
             .conn_st
             .try_convert()
             .map_err(|err| err.name("conn_st"))?;
 
         Ok(DERStatus {
-            operational_mode_status: self
+            operational_mode_status: status
                 .st
                 .try_convert()
                 .map_err(|err| err.name("operational_mode_status"))?,
             gen_connect_status: connect_status.clone(),
             stor_connect_status: connect_status,
-            alarm_status: self
+            alarm_status: status
                 .alrm
                 .try_convert()
                 .map_err(|err| err.name("alarm_status"))?,
-            state_of_charge_status: self.soc.convert(),
+            state_of_charge_status: status.soc.convert(),
             ..Default::default()
         })
     }
 }
 
-impl TryConvert<DERSettings> for ModbusSettings {
-    fn try_convert(self: ModbusSettings) -> Result<DERSettings> {
+impl TryFrom<ModbusSettings> for DERSettings {
+    type Error = NamedError;
+
+    fn try_from(settings: ModbusSettings) -> Result<DERSettings> {
         Ok(DERSettings {
-            set_es_high_volt: self
+            set_es_high_volt: settings
                 .esv_hi
                 .try_convert()
                 .map_err(|err| err.name("set_es_high_volt"))?,
@@ -161,8 +163,10 @@ impl TryConvert<DERSettings> for ModbusSettings {
     }
 }
 
-impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
-    fn try_convert(self: ModbusMetering) -> Result<Vec<MirrorMeterReading>> {
+impl TryFrom<ModbusMetering> for Vec<MirrorMeterReading> {
+    type Error = NamedError;
+
+    fn try_from(metering: ModbusMetering) -> Result<Vec<MirrorMeterReading>> {
         let now = Int64(Utc::now().timestamp());
 
         let template_reading_type = ReadingType {
@@ -187,7 +191,7 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                             flow_direction: Some(FlowDirectionType::Reverse),
                             kind: Some(KindType::Power),
                             uom: Some(UomType::W),
-                            power_of_ten_multiplier: self
+                            power_of_ten_multiplier: metering
                                 .w_sf
                                 .try_convert()
                                 .map_err(|err| err.name("w_sf"))?,
@@ -204,12 +208,12 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                 .transpose()
         };
 
-        let w = power_template("w", self.w, None)?;
-        let wl1 = power_template("wl1", self.wl1, Some(PhaseCode::PhaseA))?;
-        let wl2 = power_template("wl2", self.wl2, Some(PhaseCode::PhaseB))?;
-        let wl3 = power_template("wl3", self.wl3, Some(PhaseCode::PhaseC))?;
+        let w = power_template("w", metering.w, None)?;
+        let wl1 = power_template("wl1", metering.wl1, Some(PhaseCode::PhaseA))?;
+        let wl2 = power_template("wl2", metering.wl2, Some(PhaseCode::PhaseB))?;
+        let wl3 = power_template("wl3", metering.wl3, Some(PhaseCode::PhaseC))?;
 
-        let var = self
+        let var = metering
             .var
             .map(|value| {
                 Ok(MirrorMeterReading {
@@ -218,7 +222,7 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                         flow_direction: Some(FlowDirectionType::Reverse),
                         kind: Some(KindType::Power),
                         uom: Some(UomType::VAr),
-                        power_of_ten_multiplier: self
+                        power_of_ten_multiplier: metering
                             .var_sf
                             .try_convert()
                             .map_err(|err| err.name("var_sf"))?,
@@ -232,7 +236,7 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                 })
             })
             .transpose()?;
-        let voltages = self
+        let voltages = metering
             .voltages
             .iter()
             .map(|VoltageWithReference(v, phase)| {
@@ -242,7 +246,7 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                     reading_type: Some(ReadingType {
                         flow_direction: Some(FlowDirectionType::Forward),
                         phase: Some(phase.try_convert().map_err(|err| err.name("voltages"))?),
-                        power_of_ten_multiplier: self
+                        power_of_ten_multiplier: metering
                             .v_sf
                             .try_convert()
                             .map_err(|err| err.name("v_sf"))?,
@@ -258,7 +262,7 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let hz = self
+        let hz = metering
             .hz
             .map(|value| {
                 Ok(MirrorMeterReading {
@@ -266,7 +270,7 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
                     reading_type: Some(ReadingType {
                         flow_direction: Some(FlowDirectionType::Reverse),
                         uom: Some(UomType::Hz),
-                        power_of_ten_multiplier: self
+                        power_of_ten_multiplier: metering
                             .hz_sf
                             .try_convert()
                             .map_err(|err| err.name("hz_sf"))?,
@@ -289,58 +293,60 @@ impl TryConvert<Vec<MirrorMeterReading>> for ModbusMetering {
     }
 }
 
-impl TryConvert<ModbusParameters> for ControlAttributes {
-    fn try_convert(self: ControlAttributes) -> Result<ModbusParameters> {
+impl TryFrom<ControlAttributes> for ModbusParameters {
+    type Error = NamedError;
+
+    fn try_from(attrs: ControlAttributes) -> Result<ModbusParameters> {
         Ok(ModbusParameters {
             // AS5438 - Table F.9 to E.9
-            droop_ctl: self.base.op_mod_freq_droop.convert(),
+            droop_ctl: attrs.base.op_mod_freq_droop.convert(),
 
             // AS5438 - Table F.10 to E.10
-            es: self.base.op_mod_connect.convert(),
-            esv_hi: self
+            es: attrs.base.op_mod_connect.convert(),
+            esv_hi: attrs
                 .set_es_high_volt
                 .try_convert()
                 .map_err(|err| err.name("esv_hi"))?
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            esv_lo: self
+            esv_lo: attrs
                 .set_es_low_volt
                 .try_convert()
                 .map_err(|err| err.name("esv_lo"))?
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            es_hz_hi: self
+            es_hz_hi: attrs
                 .set_es_high_freq
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            es_hz_lo: self
+            es_hz_lo: attrs
                 .set_es_low_freq
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            es_dly_tms: self.set_es_delay.convert().map(es_time_to_seconds),
-            es_rnd_tms: self.set_es_random_delay.convert().map(es_time_to_seconds),
-            es_rmp_tms: self.set_es_ramp_tms.convert().map(es_time_to_seconds),
+            es_dly_tms: attrs.set_es_delay.convert().map(es_time_to_seconds),
+            es_rnd_tms: attrs.set_es_random_delay.convert().map(es_time_to_seconds),
+            es_rmp_tms: attrs.set_es_ramp_tms.convert().map(es_time_to_seconds),
 
             // AS5438 - Table F.11 to E.11
-            w_max_lim_pct_ena: self.base.op_mod_max_lim_w.is_some().convert(),
-            w_max_lim_pct: self
+            w_max_lim_pct_ena: attrs.base.op_mod_max_lim_w.is_some().convert(),
+            w_max_lim_pct: attrs
                 .base
                 .op_mod_max_lim_w
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
 
             // AS5438 - Table F.12 to E.12
-            w_set_ena: (self.base.op_mod_fixed_w.is_some()
-                || self.base.op_mod_target_w.is_some())
+            w_set_ena: (attrs.base.op_mod_fixed_w.is_some()
+                || attrs.base.op_mod_target_w.is_some())
             .convert(),
-            w_set_pct: self
+            w_set_pct: attrs
                 .base
                 .op_mod_fixed_w
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            w_set: self.base.op_mod_target_w.clone().convert(),
+            w_set: attrs.base.op_mod_target_w.clone().convert(),
             // Also set WSetMod conditionally. If both WSet and WSetPct are
             // available this is likely a mistake from upstream, however default
             // to WSetPct as that is the specified in the AS5438 spec.
-            w_set_mod: match (self.base.op_mod_fixed_w, self.base.op_mod_target_w) {
+            w_set_mod: match (attrs.base.op_mod_fixed_w, attrs.base.op_mod_target_w) {
                 (None, None) => None,
                 (Some(_), None) => Some(model704::WSetMod::WMaxPct),
                 (None, Some(_)) => Some(model704::WSetMod::Watts),
@@ -368,24 +374,26 @@ fn es_time_to_seconds(hundredths_of_a_second: u32) -> u32 {
 
 type ResultUnnamed<T> = std::result::Result<T, Error>;
 
-// A local trait to make writing out the conversions easier.
+// Local traits to make writing out the conversions easier. These are not
+// exposed outside of this module to avoid leaking new methods onto the commonly
+// used data types.
 trait Convert<T> {
     fn convert(self) -> T;
 }
 
-trait TryConvertUnnamed<T> {
+trait TryConvert<T> {
     fn try_convert(self) -> ResultUnnamed<T>;
 }
 
 // Specialised trait for options to avoid getting tied in knots with nested traits.
-trait OptionTryConvert<T, U: TryConvertUnnamed<T>> {
+trait OptionTryConvert<T, U: TryConvert<T>> {
     fn try_convert(self) -> ResultUnnamed<Option<T>>;
     // Conversions to error on missing values.
     fn try_convert_mandatory(self) -> ResultUnnamed<T>;
 }
 impl<T, U> OptionTryConvert<T, U> for Option<U>
 where
-    U: TryConvertUnnamed<T>,
+    U: TryConvert<T>,
 {
     fn try_convert_mandatory(self: Option<U>) -> ResultUnnamed<T> {
         match self {
@@ -417,7 +425,7 @@ where
 //////
 // Internals for converting to SEP2.
 
-impl TryConvertUnnamed<Int16> for u16 {
+impl TryConvert<Int16> for u16 {
     fn try_convert(self: u16) -> ResultUnnamed<Int16> {
         Ok(Int16(
             i16::try_from(self).map_err(|_| Error::SignedOverflow)?,
@@ -426,13 +434,13 @@ impl TryConvertUnnamed<Int16> for u16 {
 }
 
 // Int16s appear in percentages, which have a granularity of hundredths in SEP2.
-impl TryConvertUnnamed<Int16> for ScaledValue<u16> {
+impl TryConvert<Int16> for ScaledValue<u16> {
     fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<Int16> {
         self.rescale(SEP2_HUNDREDTHS_SF).value.try_convert()
     }
 }
 
-impl TryConvertUnnamed<ActivePower> for u16 {
+impl TryConvert<ActivePower> for u16 {
     fn try_convert(self: u16) -> ResultUnnamed<ActivePower> {
         Ok(ActivePower {
             value: self.try_convert()?,
@@ -459,7 +467,7 @@ impl Convert<ApparentPower> for u16 {
     }
 }
 
-impl TryConvertUnnamed<ReactivePower> for u16 {
+impl TryConvert<ReactivePower> for u16 {
     fn try_convert(self: u16) -> ResultUnnamed<ReactivePower> {
         Ok(ReactivePower {
             value: Int16(i16::try_from(self).map_err(|_| Error::SignedOverflow)?),
@@ -477,7 +485,7 @@ impl Convert<VoltageRMS> for u16 {
     }
 }
 
-impl TryConvertUnnamed<DERControlType> for Option<CtrlModes> {
+impl TryConvert<DERControlType> for Option<CtrlModes> {
     fn try_convert(self: Option<CtrlModes>) -> ResultUnnamed<DERControlType> {
         match self {
             None => Ok(DERControlType::empty()),
@@ -495,7 +503,7 @@ impl Convert<ReactiveSusceptance> for u16 {
     }
 }
 
-impl TryConvertUnnamed<OperationalModeStatusType> for model701::St {
+impl TryConvert<OperationalModeStatusType> for model701::St {
     fn try_convert(self: model701::St) -> ResultUnnamed<OperationalModeStatusType> {
         Ok(OperationalModeStatusType {
             date_time: Int64(Utc::now().timestamp()),
@@ -508,7 +516,7 @@ impl TryConvertUnnamed<OperationalModeStatusType> for model701::St {
     }
 }
 
-impl TryConvertUnnamed<ConnectStatusType> for model701::ConnSt {
+impl TryConvert<ConnectStatusType> for model701::ConnSt {
     fn try_convert(self: model701::ConnSt) -> ResultUnnamed<ConnectStatusType> {
         Ok(ConnectStatusType {
             date_time: Int64(Utc::now().timestamp()),
@@ -521,7 +529,7 @@ impl TryConvertUnnamed<ConnectStatusType> for model701::ConnSt {
     }
 }
 
-impl TryConvertUnnamed<DERAlarmStatus> for model701::Alrm {
+impl TryConvert<DERAlarmStatus> for model701::Alrm {
     fn try_convert(self: model701::Alrm) -> ResultUnnamed<DERAlarmStatus> {
         Ok(self
             .iter()
@@ -572,7 +580,7 @@ impl Convert<StateOfChargeStatusType> for ScaledValue<u16> {
     }
 }
 
-impl TryConvertUnnamed<PhaseCode> for PhaseReference {
+impl TryConvert<PhaseCode> for PhaseReference {
     fn try_convert(self: PhaseReference) -> ResultUnnamed<PhaseCode> {
         Ok(match self {
             PhaseReference::LLV => PhaseCode::PhaseABC,
@@ -587,7 +595,7 @@ impl TryConvertUnnamed<PhaseCode> for PhaseReference {
     }
 }
 
-impl TryConvertUnnamed<PowerOfTenMultiplierType> for i16 {
+impl TryConvert<PowerOfTenMultiplierType> for i16 {
     fn try_convert(self) -> ResultUnnamed<PowerOfTenMultiplierType> {
         Ok(match self {
             -9 => PowerOfTenMultiplierType::Nano,
@@ -616,7 +624,7 @@ impl TryConvertUnnamed<PowerOfTenMultiplierType> for i16 {
 
 //////
 // Internals for converting to modbus.
-impl TryConvertUnnamed<u16> for Int16 {
+impl TryConvert<u16> for Int16 {
     fn try_convert(self: Int16) -> ResultUnnamed<u16> {
         // Raise errors on negative values.
         u16::try_from(self.0).map_err(|_| Error::UnsignedNegative)
@@ -799,7 +807,7 @@ mod tests {
             soc: None,
         };
 
-        let result: Result<DERStatus> = status.try_convert();
+        let result: Result<DERStatus> = status.try_into();
         assert!(
             matches!(result, Err(NamedError { kind: Error::UnmappableInvalid, name }) if name == "operational_mode_status")
         );
@@ -814,7 +822,7 @@ mod tests {
             esv_hi: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
         };
 
-        let result: Result<DERSettings> = settings.try_convert();
+        let result: Result<DERSettings> = settings.try_into();
         assert!(result.is_ok());
     }
 
@@ -826,7 +834,7 @@ mod tests {
             esv_hi: Some(ScaledValue::new(245, -1)),
         };
 
-        let result: DERSettings = settings.try_convert().expect("Translation failed");
+        let result: DERSettings = settings.try_into().expect("Translation failed");
         assert_eq!(result.set_es_high_volt, Some(Int16(2450)));
     }
 
@@ -839,7 +847,7 @@ mod tests {
             soc: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
         };
 
-        let result: Result<DERStatus> = status.try_convert();
+        let result: Result<DERStatus> = status.try_into();
         assert!(result.is_ok());
     }
 
@@ -890,7 +898,7 @@ mod tests {
             react_suscept_rtg: Some(53),
         };
 
-        let result: Result<DERCapability> = capabilities.try_convert();
+        let result: Result<DERCapability> = capabilities.try_into();
         assert!(result.is_ok());
     }
 
@@ -908,7 +916,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: Result<Vec<MirrorMeterReading>> = metering.try_convert();
+        let result: Result<Vec<MirrorMeterReading>> = metering.try_into();
         assert!(result.is_ok());
     }
 
@@ -923,7 +931,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: Result<ModbusParameters> = parameters.try_convert();
+        let result: Result<ModbusParameters> = parameters.try_into();
         assert!(result.is_ok());
     }
 
@@ -946,7 +954,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: ModbusParameters = parameters.try_convert().expect("Translation failed");
+        let result: ModbusParameters = parameters.try_into().expect("Translation failed");
 
         assert_eq!(result.esv_hi, Some(ScaledValue::new(2450, -2)));
         assert_eq!(result.esv_lo, Some(ScaledValue::new(2000, -2)));
@@ -968,7 +976,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: ModbusParameters = parameters.try_convert().expect("Translation failed");
+        let result: ModbusParameters = parameters.try_into().expect("Translation failed");
 
         assert_eq!(result.es_dly_tms, Some(300));
         assert_eq!(result.es_rnd_tms, Some(60));
@@ -987,7 +995,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: ModbusParameters = parameters.try_convert().expect("Translation failed");
+        let result: ModbusParameters = parameters.try_into().expect("Translation failed");
 
         assert_eq!(result.es_dly_tms, Some(0));
         assert_eq!(result.es_rnd_tms, Some(1));
