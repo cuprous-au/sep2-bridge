@@ -7,7 +7,7 @@ use sep2_bridge::{
     Result, ScaledValue,
     modbus_connection::{self, Capabilities, Metering, Model711Ctl, Settings, Status, Transport},
 };
-use sunspec::models::{model701, model703};
+use sunspec::models::{model701, model703, model711};
 use tokio::{
     sync::mpsc,
     task::{self, JoinHandle},
@@ -103,6 +103,11 @@ async fn rescales_parameters_to_device_scale_factors() {
     assert_eq!(mock.get_value::<u16>("model711::CTL_1::K_OF"), 500);
     assert_eq!(mock.get_value::<u16>("model711::CTL_1::K_UF"), 400);
     assert_eq!(mock.get_value::<u32>("model711::CTL_1::RSP_TMS"), 5);
+    assert_eq!(
+        mock.get_value::<model711::Ena>("model711::ENA"),
+        model711::Ena::Enabled
+    );
+    assert_eq!(mock.get_value::<u16>("model711::ADPT_CTL_REQ"), 2);
 }
 
 /// Tests that a device which doesn't implement a scale factor register is
