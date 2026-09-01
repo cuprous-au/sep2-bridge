@@ -538,64 +538,81 @@ async fn send_new_parameters(
     }
 
     // AS5438 - Table E.9, Section E.4.7
-    if device.models.supported_model_ids().contains(&711)
-        && let Some(droop_ctl) = parameters.droop_ctl.as_ref()
-    {
-        // As per the modbus spec, the first control is readonly and represents
-        // the current state. Make sure the device allows at least one other
-        // control before continuing.
-        let n_ctl = device.read_point(Model711::N_CTL).await.map_err(comm_err)?;
-        if n_ctl >= 2 {
-            // We write into the second Ctl group.
-            let offset = Model711::addr(&device.models).addr + Model711::LEN + model711::Ctl::LEN;
+    if device.models.supported_model_ids().contains(&711) {
+        let ena = if let Some(droop_ctl) = parameters.droop_ctl.as_ref() {
+            // As per the modbus spec, the first control is readonly and represents
+            // the current state. Make sure the device allows at least one other
+            // control before continuing.
+            let n_ctl = device.read_point(Model711::N_CTL).await.map_err(comm_err)?;
+            if n_ctl >= 2 {
+                // We write into the second Ctl group.
+                let offset =
+                    Model711::addr(&device.models).addr + Model711::LEN + model711::Ctl::LEN;
 
-            let db_sf = device.read_point(Model711::DB_SF).await.map_err(comm_err)?;
-            let k_sf = device.read_point(Model711::K_SF).await.map_err(comm_err)?;
-            let rsp_tms_sf = device
-                .read_point(Model711::RSP_TMS_SF)
-                .await
-                .map_err(comm_err)?;
-            // And assign manually
+                let db_sf = device.read_point(Model711::DB_SF).await.map_err(comm_err)?;
+                let k_sf = device.read_point(Model711::K_SF).await.map_err(comm_err)?;
+                let rsp_tms_sf = device
+                    .read_point(Model711::RSP_TMS_SF)
+                    .await
+                    .map_err(comm_err)?;
+                // And assign manually
 
-            // FIXME: It would be nice to write all of these registers in one
-            // call. However, we can't write the read_only register itself
-            // so it's not as trivial as encoding the entire struct.
-            write_offset_point(
-                device,
-                offset,
-                model711::Ctl::DB_OF,
-                droop_ctl.db_of.rescale(db_sf).value,
-            )
-            .await?;
-            write_offset_point(
-                device,
-                offset,
-                model711::Ctl::DB_UF,
-                droop_ctl.db_uf.rescale(db_sf).value,
-            )
-            .await?;
-            write_offset_point(
-                device,
-                offset,
-                model711::Ctl::K_OF,
-                droop_ctl.k_of.rescale(k_sf).value,
-            )
-            .await?;
-            write_offset_point(
-                device,
-                offset,
-                model711::Ctl::K_UF,
-                droop_ctl.k_uf.rescale(k_sf).value,
-            )
-            .await?;
-            write_offset_point(
-                device,
-                offset,
-                model711::Ctl::RSP_TMS,
-                droop_ctl.rsp_tms.rescale(rsp_tms_sf).value,
-            )
-            .await?;
-        }
+                // FIXME: It would be nice to write all of these registers in one
+                // call. However, we can't write the read_only register itself
+                // so it's not as trivial as encoding the entire struct.
+                write_offset_point(
+                    device,
+                    offset,
+                    model711::Ctl::DB_OF,
+                    droop_ctl.db_of.rescale(db_sf).value,
+                )
+                .await?;
+                write_offset_point(
+                    device,
+                    offset,
+                    model711::Ctl::DB_UF,
+                    droop_ctl.db_uf.rescale(db_sf).value,
+                )
+                .await?;
+                write_offset_point(
+                    device,
+                    offset,
+                    model711::Ctl::K_OF,
+                    droop_ctl.k_of.rescale(k_sf).value,
+                )
+                .await?;
+                write_offset_point(
+                    device,
+                    offset,
+                    model711::Ctl::K_UF,
+                    droop_ctl.k_uf.rescale(k_sf).value,
+                )
+                .await?;
+                write_offset_point(
+                    device,
+                    offset,
+                    model711::Ctl::RSP_TMS,
+                    droop_ctl.rsp_tms.rescale(rsp_tms_sf).value,
+                )
+                .await?;
+
+                // After filling the fields we request the Ctl group to be applied.
+                device
+                    .write_point(Model711::ADPT_CTL_REQ, 2)
+                    .await
+                    .map_err(comm_err)?;
+
+                model711::Ena::Enabled
+            } else {
+                model711::Ena::Disabled
+            }
+        } else {
+            model711::Ena::Disabled
+        };
+        device
+            .write_point(Model711::ENA, ena)
+            .await
+            .map_err(comm_err)?;
     }
 
     // AS5438 - Table E.10, Section E.4.8

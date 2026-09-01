@@ -179,6 +179,8 @@ async fn applies_as5438_table_9() {
     assert_register(&mock, "model711::CTL_1::K_OF", EXPECTED_K_OF).await;
     assert_register(&mock, "model711::CTL_1::K_UF", EXPECTED_K_UF).await;
     assert_register(&mock, "model711::CTL_1::RSP_TMS", EXPECTED_RSP_TMS).await;
+    assert_register(&mock, "model711::ENA", model711::Ena::Enabled).await;
+    assert_register(&mock, "model711::ADPT_CTL_REQ", 2u16).await;
 
     // The read-only group reporting the current settings must not be touched,
     // and the writable group must stay marked writable.

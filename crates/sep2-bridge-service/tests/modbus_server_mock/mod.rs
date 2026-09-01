@@ -540,6 +540,12 @@ pub fn add_model_711(
 
     let offset = base_offset + 2;
     Model711::ENA.fill_registers(registers, offset, model711::Ena::Disabled);
+    locations.insert("model711::ENA".into(), location(Model711::ENA, offset));
+    Model711::ADPT_CTL_REQ.fill_registers(registers, offset, 1);
+    locations.insert(
+        "model711::ADPT_CTL_REQ".into(),
+        location(Model711::ADPT_CTL_REQ, offset),
+    );
     Model711::N_CTL.fill_registers(registers, offset, N_CTL);
     // Deliberately not the scale factors SEP2 fixes its droop values at, so
     // that anything written here has to be rescaled to land correctly. One of
