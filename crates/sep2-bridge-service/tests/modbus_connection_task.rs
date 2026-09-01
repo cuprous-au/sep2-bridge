@@ -242,6 +242,51 @@ async fn reconnects() {
     ));
 }
 
+/// Tests the reconnection logic when the device only supports model 1, then
+/// disconnects and reappears with more models.
+#[tokio::test]
+async fn reconnects_and_discovers_new_models() {
+    // Setup
+    let (mut mock, _task, _input_ch, mut output_ch) = setup(Some(&[1])).await;
+
+    // Wait for first poll of the device
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // We expect a device connected message and at least one poll with no data
+    let all_events = collect_all(&mut output_ch).await;
+    assert!(
+        all_events
+            .iter()
+            .any(|ev| matches!(ev, modbus_connection::Event::DeviceConnected(_)))
+    );
+    assert!(
+        all_events
+            .iter()
+            .any(|ev| matches!(ev, modbus_connection::Event::StatePolled(None, None, None)))
+    );
+
+    // Now disconnect the mock server.
+    mock.stop().await;
+
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // After wait, change the mock to support capabilities.
+    mock.reinit(Some(&[1, 701, 702, 703]));
+    mock.start()
+        .await
+        .expect("Couldn't start mock modbus server");
+
+    // Wait for the task to reconnect
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // And we expect to receive some capabilities from the mock.
+    let all_events = collect_all(&mut output_ch).await;
+    assert!(all_events.iter().any(|ev| matches!(
+        ev,
+        modbus_connection::Event::CapabilitiesPolled(Capabilities { .. })
+    )));
+}
+
 /// Tests whether the task tolerates missing capabilities (model 702)
 #[tokio::test]
 async fn tolerates_missing_capabilities() {

@@ -35,6 +35,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    // Model1 doesn't support Clone, so wrap it with an Arc to pass around a reference.
+    DeviceConnected(Arc<Model1>),
     CapabilitiesPolled(Capabilities),
     StatePolled(Option<Status>, Option<Settings>, Option<Metering>),
 }
@@ -134,8 +136,12 @@ pub async fn task(
                 Ok(Err(err)) => {
                     drop_connection(device_opt.take(), err).await;
                 }
-                Ok(Ok((new_device, capabilities))) => {
+                Ok(Ok((new_device, model1, capabilities))) => {
                     device_opt = Some(new_device);
+                    output_ch
+                        .broadcast(Event::DeviceConnected(Arc::new(model1)))
+                        .await
+                        .map_err(|_| crate::Error::ChannelClosed)?;
                     if let Some(capabilities) = capabilities {
                         log::trace!("Broadcasting CapabilitiesPolled");
                         output_ch
@@ -199,12 +205,16 @@ pub async fn task(
 }
 
 /// Given a modbus socket target, attempt to connect and probe the device
-/// capabilities. On success, returns the modbus device and an optional
-/// capabilities structure if the probe was successful.
+/// capabilities. On success, returns the modbus device, the device info from
+/// model 1, and an optional capabilities structure if the probe was successful.
 async fn establish_connection(
     socket: &Transport,
     device_id: u8,
-) -> Result<(AsyncDevice<TokioModbusContext>, Option<Capabilities>)> {
+) -> Result<(
+    AsyncDevice<TokioModbusContext>,
+    Model1,
+    Option<Capabilities>,
+)> {
     let context = match socket {
         Transport::Unix(path) => {
             let stream = UnixStream::connect(path).await.map_err(|err| {
@@ -261,7 +271,7 @@ async fn establish_connection(
 
     let capabilities = capabilities_query(&device).await?;
 
-    Ok((device, capabilities))
+    Ok((device, m1, capabilities))
 }
 
 /////
@@ -473,6 +483,11 @@ impl Metering {
 async fn poll_device_state(
     device: &AsyncDevice<TokioModbusContext>,
 ) -> Result<(Option<Status>, Option<Settings>, Option<Metering>)> {
+    // Always poll model 1. This acts as a health check regardless of what other
+    // models the device supports. For example a device might only expose models
+    // to control it but not provide any feedback. Likely this is not compliant
+    // but it is simple to support and also useful in development.
+    let _m1: Model1 = device.read_model().await.map_err(comm_err)?;
     let m701 = read_model_safe::<Model701>(device).await?;
     let m703 = read_model_safe::<Model703>(device).await?;
     let m713 = read_model_safe::<Model713>(device).await?;
