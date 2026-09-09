@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use sep2_common::packages::{
-    der::DERControl,
+    der::{DERControl, DefaultDERControl},
     identification::{ResponseRequired, ResponseStatus},
     primitives::{HexBinary160, Int64},
     types::MRIDType,
@@ -188,13 +188,16 @@ fn calc_parameters_for_controls(
         })
         // Convert them to attributes
         .map(|control| match control {
-            ControlRef::Default(default) => default.into(),
-            ControlRef::Scheduled(control) => (&control.der_control).into(),
+            ControlRef::Default(default) => default.clone(),
+            ControlRef::Scheduled(control) => DefaultDERControl {
+                der_control_base: control.der_control.der_control_base.clone(),
+                ..Default::default()
+            },
         })
         // And project them down in the order given
-        .fold(ControlAttributes::default(), |a, b| a.overlay_on(b));
+        .fold(DefaultDERControl::default(), attributes::overlay_controls);
 
-    Ok(parameters)
+    Ok(ControlAttributes { inner: parameters })
 }
 
 /// Return the reply_to address if it is given on the control and if the
@@ -418,9 +421,9 @@ mod tests {
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
             calc_parameters_for_controls(ordered_controls, data.time_only_defaults).unwrap();
-        assert_eq!(parameters.base.op_mod_connect, Some(true));
+        assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
-            parameters.base.op_mod_imp_lim_w,
+            parameters.inner.der_control_base.op_mod_imp_lim_w,
             data.defaults[1].der_control_base.op_mod_imp_lim_w
         );
         assert_eq!(parameters.num_active(), 2);
@@ -430,16 +433,16 @@ mod tests {
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
             calc_parameters_for_controls(ordered_controls, data.time_first_active).unwrap();
-        assert_eq!(parameters.base.op_mod_connect, Some(true));
+        assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
-            parameters.base.op_mod_imp_lim_w,
+            parameters.inner.der_control_base.op_mod_imp_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
                 .op_mod_imp_lim_w
         );
         assert_eq!(
-            parameters.base.op_mod_gen_lim_w,
+            parameters.inner.der_control_base.op_mod_gen_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
@@ -452,30 +455,30 @@ mod tests {
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
             calc_parameters_for_controls(ordered_controls, data.time_all_active).unwrap();
-        assert_eq!(parameters.base.op_mod_connect, Some(true));
+        assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
-            parameters.base.op_mod_imp_lim_w,
+            parameters.inner.der_control_base.op_mod_imp_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
                 .op_mod_imp_lim_w
         );
         assert_eq!(
-            parameters.base.op_mod_gen_lim_w,
+            parameters.inner.der_control_base.op_mod_gen_lim_w,
             data.controls[0]
                 .der_control
                 .der_control_base
                 .op_mod_gen_lim_w
         );
         assert_eq!(
-            parameters.base.op_mod_load_lim_w,
+            parameters.inner.der_control_base.op_mod_load_lim_w,
             data.controls[1]
                 .der_control
                 .der_control_base
                 .op_mod_load_lim_w
         );
         assert_eq!(
-            parameters.base.op_mod_target_w,
+            parameters.inner.der_control_base.op_mod_target_w,
             data.controls[2]
                 .der_control
                 .der_control_base
@@ -488,23 +491,23 @@ mod tests {
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
             calc_parameters_for_controls(ordered_controls, data.time_second_active).unwrap();
-        assert_eq!(parameters.base.op_mod_connect, Some(true));
+        assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
-            parameters.base.op_mod_imp_lim_w,
+            parameters.inner.der_control_base.op_mod_imp_lim_w,
             data.controls[1]
                 .der_control
                 .der_control_base
                 .op_mod_imp_lim_w
         );
         assert_eq!(
-            parameters.base.op_mod_load_lim_w,
+            parameters.inner.der_control_base.op_mod_load_lim_w,
             data.controls[1]
                 .der_control
                 .der_control_base
                 .op_mod_load_lim_w
         );
         assert_eq!(
-            parameters.base.op_mod_target_w,
+            parameters.inner.der_control_base.op_mod_target_w,
             data.controls[2]
                 .der_control
                 .der_control_base
