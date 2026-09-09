@@ -2,7 +2,7 @@ use async_broadcast::Sender as BroadcastSender;
 use sep2_client::client::{Client, PollCallback};
 use sep2_common::{
     packages::{
-        der::{DERControlList, DERProgramList, DefaultDERControl},
+        der::{DERControlList, DERCurveList, DERProgramList, DefaultDERControl},
         edev::EndDeviceList,
         fsa::FunctionSetAssignmentsList,
         primitives::Uint32,
@@ -45,12 +45,14 @@ pub async fn start_poll_for(
         | ResourceKind::DefaultDERControl
         | ResourceKind::DERProgram
         | ResourceKind::DERControl
+        | ResourceKind::DERCurve
         | ResourceKind::EndDevice
         | ResourceKind::FunctionSetAssignments => href,
         // Lists add pagination options.
         ResourceKind::EndDeviceList
         | ResourceKind::FunctionSetAssignmentsList
         | ResourceKind::DERProgramList
+        | ResourceKind::DERCurveList
         | ResourceKind::DERControlList => &paginated_uri(href, max_list_size),
     };
     match kind {
@@ -108,11 +110,21 @@ pub async fn start_poll_for(
             )
             .await
         }
+        ResourceKind::DERCurveList => {
+            get_then_poll(
+                client,
+                kind_href,
+                poll_rate,
+                make_poll_callback::<DERCurveList>(broadcast),
+            )
+            .await
+        }
         // These are no-ops: we don't want to subscribe to them individually as they will be obtained by a list subscription instead.
         ResourceKind::EndDevice
         | ResourceKind::FunctionSetAssignments
         | ResourceKind::DERProgram
-        | ResourceKind::DERControl => {}
+        | ResourceKind::DERControl
+        | ResourceKind::DERCurve => {}
     };
 }
 

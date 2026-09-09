@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use sep2_common::packages::{
-    der::{DERControl, DefaultDERControl},
+    der::{DERControl, DERCurve, DefaultDERControl},
     identification::{ResponseRequired, ResponseStatus},
     primitives::{HexBinary160, Int64},
     types::MRIDType,
@@ -170,13 +170,18 @@ fn calc_parameters(
 ) -> Result<ControlAttributes> {
     let i64_now = Int64(now.timestamp());
     let controls = model.all_controls_for_device(device_lfdi, i64_now)?;
-    calc_parameters_for_controls(controls, i64_now)
+    let curve_lookup = |href: &str| model.get_curve_by_href(href).cloned();
+    calc_parameters_for_controls(controls, curve_lookup, i64_now)
 }
 
-fn calc_parameters_for_controls(
+fn calc_parameters_for_controls<F>(
     controls: Vec<ControlRef>,
+    curve_lookup: F,
     i64_now: Int64,
-) -> Result<ControlAttributes> {
+) -> Result<ControlAttributes>
+where
+    F: Fn(&str) -> Option<DERCurve>,
+{
     let parameters = controls
         .into_iter()
         // Filter out any controls that are not active right now
@@ -197,7 +202,17 @@ fn calc_parameters_for_controls(
         // And project them down in the order given
         .fold(DefaultDERControl::default(), attributes::overlay_controls);
 
-    Ok(ControlAttributes { inner: parameters })
+    // Extract the curves available. Duplicates will be removed by the HashMap
+    // collect.
+    let curves = attributes::all_curve_hrefs(&parameters.der_control_base)
+        .into_iter()
+        .flat_map(|href| curve_lookup(href).map(|curve| (String::from(href), curve)))
+        .collect();
+
+    Ok(ControlAttributes {
+        inner: parameters,
+        curves,
+    })
 }
 
 /// Return the reply_to address if it is given on the control and if the
@@ -416,11 +431,15 @@ mod tests {
 
     #[test]
     fn parameters_includes_only_active_controls() {
+        // For these tests, we don't care about curves, so mock them as Nones
+        let curve_lookup = |_href: &str| None;
+
         // Calculating when there are only defaults
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
-            calc_parameters_for_controls(ordered_controls, data.time_only_defaults).unwrap();
+            calc_parameters_for_controls(ordered_controls, curve_lookup, data.time_only_defaults)
+                .unwrap();
         assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
             parameters.inner.der_control_base.op_mod_imp_lim_w,
@@ -432,7 +451,8 @@ mod tests {
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
-            calc_parameters_for_controls(ordered_controls, data.time_first_active).unwrap();
+            calc_parameters_for_controls(ordered_controls, curve_lookup, data.time_first_active)
+                .unwrap();
         assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
             parameters.inner.der_control_base.op_mod_imp_lim_w,
@@ -454,7 +474,8 @@ mod tests {
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
-            calc_parameters_for_controls(ordered_controls, data.time_all_active).unwrap();
+            calc_parameters_for_controls(ordered_controls, curve_lookup, data.time_all_active)
+                .unwrap();
         assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
             parameters.inner.der_control_base.op_mod_imp_lim_w,
@@ -490,7 +511,8 @@ mod tests {
         let data = mock_controls();
         let ordered_controls = mock_ordered_controls(&data);
         let parameters =
-            calc_parameters_for_controls(ordered_controls, data.time_second_active).unwrap();
+            calc_parameters_for_controls(ordered_controls, curve_lookup, data.time_second_active)
+                .unwrap();
         assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
         assert_eq!(
             parameters.inner.der_control_base.op_mod_imp_lim_w,

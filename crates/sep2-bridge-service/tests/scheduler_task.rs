@@ -11,12 +11,13 @@ use chrono::{DateTime, Utc};
 use sep2_bridge::{Result, scheduler, sep2_connection::Sep2ResourceEvent};
 use sep2_common::packages::{
     der::{
-        ActivePower, DERControl, DERControlBase, DERControlList, DERProgram, DERProgramList,
-        DefaultDERControl,
+        ActivePower, DERControl, DERControlBase, DERControlList, DERCurve, DERCurveList,
+        DERProgram, DERProgramList, DefaultDERControl,
     },
     edev::{EndDevice, EndDeviceList},
     fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
     identification::{Link, ListLink, ResponseRequired, ResponseStatus},
+    links::{DERCurveLink, DERCurveListLink},
     primitives::{HexBinary160, Int16, Int64, Uint16, Uint32},
     types::{DateTimeInterval, MRIDType, PowerOfTenMultiplierType, PrimacyType, SFDIType},
 };
@@ -33,7 +34,7 @@ async fn requests_polling() {
     let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
 
     // Fill map of responses for hrefs.
-    let (resource_map, _) = resource_map_no_controls();
+    let resource_map = resource_map_no_controls();
 
     // Send first resource
     input_ch
@@ -44,7 +45,13 @@ async fn requests_polling() {
         .expect("Send failure");
 
     // Additional poll requests that will be received but we won't respond with a resource.
-    let additional_hrefs = [HREF_EDEV, HREF_FSA, HREF_DERP, HREF_DDERC];
+    let additional_hrefs = [
+        HREF_EDEV,
+        HREF_FSA,
+        HREF_DERP,
+        HREF_DDERC,
+        HREF_HFRT_MUST_TRIP_CURVE,
+    ];
 
     // Expect that each of the resources was queried.
     let mut resources_to_be_queried: HashSet<_> = resource_map
@@ -101,16 +108,12 @@ async fn emits_parameters() {
     let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
 
     // Send all resources
-    let (ordered_resources, expected_number_of_events) = resource_map_no_controls();
-    for resource in ordered_resources.values() {
+    for resource in resource_map_no_controls().values() {
         input_ch
             .send(scheduler::Command::ResourceUpdated(resource.clone()))
             .await
             .expect("Send failure")
     }
-
-    // Flush all expected events out from the queue.
-    collect_n_events(&mut output_ch, expected_number_of_events).await;
 
     // Send a change to the default controls
     let set_grad_w = Uint16(19);
@@ -120,6 +123,12 @@ async fn emits_parameters() {
 
         set_grad_w: Some(set_grad_w),
         set_es_high_volt: Some(set_es_high_volt),
+        der_control_base: DERControlBase {
+            op_mod_hfrt_must_trip: Some(DERCurveLink {
+                href: HREF_HFRT_MUST_TRIP_CURVE.into(),
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     }));
     input_ch
@@ -127,16 +136,29 @@ async fn emits_parameters() {
         .await
         .expect("Send failure");
 
-    // Extract the parameters emitted.
-    let event = time::timeout(TIMEOUT, output_ch.recv())
-        .await
-        .expect("No events from scheduler")
-        .expect("Recv error");
+    // Skip past the events generated while applying the resources above, and
+    // extract the parameters produced by the default control just sent. We can
+    // detect those parameters by the value of set_grad_w.
+    let event = recv_until(&mut output_ch, |event| {
+        matches!(event, scheduler::Event::ParametersChanged(parameters)
+            if parameters.inner.set_grad_w == Some(set_grad_w))
+    })
+    .await;
     match event {
         scheduler::Event::ParametersChanged(parameters) => {
-            assert_eq!(parameters.num_active(), 2);
-            assert_eq!(parameters.inner.set_grad_w, Some(set_grad_w));
+            assert_eq!(parameters.num_active(), 3);
             assert_eq!(parameters.inner.set_es_high_volt, Some(set_es_high_volt));
+
+            // Ensure that we have a matching curve for the provided HFRT must trip curve.
+            let href = parameters
+                .inner
+                .der_control_base
+                .op_mod_hfrt_must_trip
+                .clone()
+                .expect("Should have hfrt curve")
+                .href;
+
+            assert!(parameters.curves.contains_key(&href));
         }
         event => {
             panic!("Unexpected event {:?} from scheduler", event);
@@ -151,16 +173,12 @@ async fn produces_schedule_on_time() {
     let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
 
     // Send all resources
-    let (ordered_resources, expected_number_of_events) = resource_map_no_controls();
-    for resource in ordered_resources.values() {
+    for resource in resource_map_no_controls().values() {
         input_ch
             .send(scheduler::Command::ResourceUpdated(resource.clone()))
             .await
             .expect("Send failure")
     }
-
-    // Flush all expected events out from the queue.
-    collect_n_events(&mut output_ch, expected_number_of_events).await;
 
     // Provide a control which should start in 3s and last for 2s. However, we
     // can only specify a control's time to the nearest second, so round "now".
@@ -206,15 +224,15 @@ async fn produces_schedule_on_time() {
         .send(scheduler::Command::ResourceUpdated(dercl))
         .await
         .expect("Send failure");
-    // Swallow the LinkAdded event
-    assert!(matches!(
-        time::timeout(TIMEOUT, output_ch.recv())
-            .await
-            .expect("Timeout")
-            .expect("Recv failure"),
-        scheduler::Event::LinkAdded { .. }
-    ));
-    // And check for the expected EventReceived notification.
+    // Skip past the events generated while applying the resources above, up to
+    // and including the LinkAdded for the control just sent.
+    recv_until(
+        &mut output_ch,
+        |event| matches!(event, scheduler::Event::LinkAdded { href, .. } if href == HREF_DERC_1),
+    )
+    .await;
+    // The remaining events for that control follow immediately, so check for
+    // the expected EventReceived notification.
     assert!(matches!(
         time::timeout(TIMEOUT, output_ch.recv())
             .await
@@ -327,10 +345,12 @@ const HREF_DERP: &str = "/edev/1/derp/1";
 const HREF_DDERC: &str = "/edev/1/derp/1/dderc";
 const HREF_DERCL: &str = "/edev/1/derp/1/derc";
 const HREF_DERC_1: &str = "/edev/1/derp/1/derc/1";
+const HREF_CURVEL: &str = "/dc";
+const HREF_HFRT_MUST_TRIP_CURVE: &str = "/dc/1";
 
 /// Returns a resource map and the expected number of events that would be
 /// generated from applying all resources.
-fn resource_map_no_controls() -> (HashMap<&'static str, Sep2ResourceEvent>, usize) {
+fn resource_map_no_controls() -> HashMap<&'static str, Sep2ResourceEvent> {
     let mut resource_map: HashMap<&'static str, Sep2ResourceEvent> = HashMap::new();
 
     let lfdi = mock_lfdi();
@@ -392,6 +412,10 @@ fn resource_map_no_controls() -> (HashMap<&'static str, Sep2ResourceEvent>, usiz
                     href: HREF_DERCL.into(),
                     ..Default::default()
                 }),
+                der_curve_list_link: Some(DERCurveListLink {
+                    href: HREF_CURVEL.into(),
+                    ..Default::default()
+                }),
 
                 mrid: MRIDType(123),
 
@@ -424,15 +448,56 @@ fn resource_map_no_controls() -> (HashMap<&'static str, Sep2ResourceEvent>, usiz
             href: Some(HREF_DDERC.into()),
 
             set_grad_w: Some(Uint16(42)),
+            der_control_base: DERControlBase {
+                op_mod_hfrt_must_trip: Some(DERCurveLink {
+                    href: HREF_HFRT_MUST_TRIP_CURVE.into(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         })),
     );
+    resource_map.insert(
+        HREF_CURVEL,
+        Sep2ResourceEvent::DERCurveList(Arc::new(DERCurveList {
+            href: Some(HREF_CURVEL.into()),
 
-    // Hard-coding this number: it will need adjustment if the resources above
-    // are modified or added to.
-    let expected_number_of_events = 9;
+            der_curve: vec![DERCurve {
+                href: Some(HREF_HFRT_MUST_TRIP_CURVE.into()),
+                mrid: MRIDType(1001),
 
-    (resource_map, expected_number_of_events)
+                // Deliberately leaving this empty: we only need to test
+                // that the curve is emitted, not its contents.
+                ..Default::default()
+            }],
+            all: Uint32(1),
+            results: Uint32(1),
+        })),
+    );
+
+    resource_map
+}
+
+/// Receives events until one satisfying `predicate` arrives, discarding those
+/// before it. Used to skip over events whose number depends on the order the
+/// resources were applied in.
+async fn recv_until<F>(
+    output_ch: &mut async_broadcast::Receiver<scheduler::Event>,
+    predicate: F,
+) -> scheduler::Event
+where
+    F: Fn(&scheduler::Event) -> bool,
+{
+    loop {
+        let event = time::timeout(TIMEOUT, output_ch.recv())
+            .await
+            .expect("Timeout waiting for expected event")
+            .expect("Recv failure");
+
+        if predicate(&event) {
+            return event;
+        }
+    }
 }
 
 async fn collect_n_events<T: Clone>(
