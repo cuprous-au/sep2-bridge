@@ -12,6 +12,8 @@ use sunspec::models::model701::{self, Model701};
 use sunspec::models::model702::Model702;
 use sunspec::models::model703::{self, Model703};
 use sunspec::models::model704::{self, Model704};
+use sunspec::models::model709::{self, Model709};
+use sunspec::models::model710::{self, Model710};
 use sunspec::models::model711::{self, Model711};
 use sunspec::models::model713::Model713;
 use sunspec::{Group, Model, Point, Value};
@@ -41,7 +43,7 @@ impl SunSpecMock {
         enabled_models: Option<&[u32]>,
     ) -> Result<SunSpecMock, Box<dyn std::error::Error>> {
         // Initialise the internal state
-        let mut registers = vec![0u16; 41000];
+        let mut registers = vec![0u16; 42000];
         let locations = initialise_registers(&mut registers, enabled_models);
 
         // Mutex these states for the service.
@@ -129,7 +131,22 @@ impl SunSpecMock {
             .get(name)
             .unwrap_or_else(|| panic!("Unknown location {}", name));
         let registers = self.service_data.registers.lock().expect("Mutex failure");
-        T::decode(&registers[offset..offset + length]).expect("Decode failure")
+        T::decode(&registers[offset..offset + length])
+            .unwrap_or_else(|err| panic!("Decode failure at {offset}+{length}: {err}"))
+    }
+
+    pub fn get_value_at_addr<T: Value>(&self, addr: usize, length: usize) -> T {
+        let registers = self.service_data.registers.lock().expect("Mutex failure");
+        T::decode(&registers[addr..addr + length])
+            .unwrap_or_else(|err| panic!("Decode failure at {addr}+{length}: {err}"))
+    }
+
+    pub fn get_name_addr(&self, name: &str) -> usize {
+        let (offset, _) = *self
+            .locations
+            .get(name)
+            .unwrap_or_else(|| panic!("Unknown location {}", name));
+        offset
     }
 
     /// Sets a value of a named register. For new registers to be added, their
@@ -275,6 +292,12 @@ fn initialise_registers(registers: &mut [u16], enabled_models: Option<&[u32]>) -
         }
         if enabled_models.is_none_or(|v| v.contains(&704)) {
             offset = add_model_704(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&709)) {
+            offset = add_model_709(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&710)) {
+            offset = add_model_710(registers, offset, &mut locations);
         }
         if enabled_models.is_none_or(|v| v.contains(&711)) {
             offset = add_model_711(registers, offset, &mut locations);
@@ -520,6 +543,128 @@ pub fn add_model_704(
     offset + usize::from(length)
 }
 
+/// Appends Model 709 (DER Trip low frequency)
+///
+/// This model contains curves which are a repeating group, and these themselves
+/// contain points which are repeating groups.
+pub fn add_model_709(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    let n_crv_set = 2;
+    let n_pt = 4;
+
+    // Assuming MustTrip, MayTrip, MomCess are all the same layout.
+    let crv_len = model709::Crv::LEN + 3 * (model709::MustTrip::LEN + model709::Pt::LEN * n_pt);
+    let length = Model709::LEN + crv_len * n_crv_set;
+
+    registers[base_offset] = Model709::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+
+    Model709::ENA.fill_registers(registers, offset, model709::Ena::Disabled);
+    locations.insert("model709::ENA".into(), location(Model709::ENA, offset));
+    Model709::ADPT_CRV_REQ.fill_registers(registers, offset, 1);
+    locations.insert(
+        "model709::ADPT_CRV_REQ".into(),
+        location(Model709::ADPT_CRV_REQ, offset),
+    );
+    Model709::N_PT.fill_registers(registers, offset, n_pt);
+    locations.insert("model709::N_PT".into(), location(Model709::N_PT, offset));
+    Model709::N_CRV_SET.fill_registers(registers, offset, n_crv_set);
+    locations.insert(
+        "model709::N_CRV_SET".into(),
+        location(Model709::N_CRV_SET, offset),
+    );
+    Model709::HZ_SF.fill_registers(registers, offset, 1);
+    locations.insert("model709::HZ_SF".into(), location(Model709::HZ_SF, offset));
+    Model709::TMS_SF.fill_registers(registers, offset, 2);
+    locations.insert(
+        "model709::TMS_SF".into(),
+        location(Model709::TMS_SF, offset),
+    );
+
+    // Ensure the 1st curve is readonly
+    model709::Crv::READ_ONLY.fill_registers(
+        registers,
+        offset + usize::from(Model709::LEN),
+        model709::CrvReadOnly::R,
+    );
+
+    // Skip to the 2nd curve, skipping past the Crv::READ_ONLY point.
+    let curve_offset = offset + usize::from(Model709::LEN + crv_len + model709::Crv::LEN);
+    // Don't fill any curve data but just record this location so we can look up values later.
+    locations.insert(
+        "model709::CRV_2_ACT_PT".into(),
+        location(model709::MustTrip::ACT_PT, curve_offset),
+    );
+
+    offset + usize::from(length)
+}
+
+/// Appends Model 710 (DER Trip high frequency)
+///
+/// This model contains curves which are a repeating group, and these themselves
+/// contain points which are repeating groups.
+pub fn add_model_710(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    let n_crv_set = 3;
+    let n_pt = 6;
+
+    // Assuming MustTrip, MayTrip, MomCess are all the same layout.
+    let crv_len = model710::Crv::LEN + 3 * (model710::MustTrip::LEN + model710::Pt::LEN * n_pt);
+    let length = Model710::LEN + crv_len * n_crv_set;
+
+    registers[base_offset] = Model710::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+
+    Model710::ENA.fill_registers(registers, offset, model710::Ena::Disabled);
+    locations.insert("model710::ENA".into(), location(Model710::ENA, offset));
+    Model710::ADPT_CRV_REQ.fill_registers(registers, offset, 1);
+    locations.insert(
+        "model710::ADPT_CRV_REQ".into(),
+        location(Model710::ADPT_CRV_REQ, offset),
+    );
+    Model710::N_PT.fill_registers(registers, offset, n_pt);
+    locations.insert("model710::N_PT".into(), location(Model710::N_PT, offset));
+    Model710::N_CRV_SET.fill_registers(registers, offset, n_crv_set);
+    locations.insert(
+        "model710::N_CRV_SET".into(),
+        location(Model710::N_CRV_SET, offset),
+    );
+    Model710::HZ_SF.fill_registers(registers, offset, 1);
+    locations.insert("model710::HZ_SF".into(), location(Model710::HZ_SF, offset));
+    Model710::TMS_SF.fill_registers(registers, offset, 2);
+    locations.insert(
+        "model710::TMS_SF".into(),
+        location(Model710::TMS_SF, offset),
+    );
+
+    // Ensure the 1st curve is readonly
+    model710::Crv::READ_ONLY.fill_registers(
+        registers,
+        offset + usize::from(Model710::LEN),
+        model710::CrvReadOnly::R,
+    );
+
+    // Skip to the 2nd curve, skipping past the rw point.
+    let curve_offset = offset + usize::from(Model710::LEN + crv_len + model710::Crv::LEN);
+    // Don't fill any curve data but just record this location so we can look up values later.
+    locations.insert(
+        "model710::CRV_2_ACT_PT".into(),
+        location(model710::MustTrip::ACT_PT, curve_offset),
+    );
+
+    offset + usize::from(length)
+}
+
 /// Appends Model 711 (DER Frequency Droop)
 ///
 /// The model has a repeating `Ctl` group; we provide two of them as the first
@@ -561,40 +706,40 @@ pub fn add_model_711(
     );
 
     // The first control group is read-only and reports the current settings.
-    let ctl_0 = offset + usize::from(Model711::LEN);
-    fill_ctl_group(registers, ctl_0, model711::CtlReadOnly::R);
+    let ctl_1 = offset + usize::from(Model711::LEN);
+    fill_ctl_group(registers, ctl_1, model711::CtlReadOnly::R);
 
     // The second control group is the writable one.
-    let ctl_1 = ctl_0 + usize::from(model711::Ctl::LEN);
-    fill_ctl_group(registers, ctl_1, model711::CtlReadOnly::Rw);
+    let ctl_2 = ctl_1 + usize::from(model711::Ctl::LEN);
+    fill_ctl_group(registers, ctl_2, model711::CtlReadOnly::Rw);
     for (name, point_location) in [
+        (
+            "model711::CTL_2::DB_OF",
+            location(model711::Ctl::DB_OF, ctl_2),
+        ),
+        (
+            "model711::CTL_2::DB_UF",
+            location(model711::Ctl::DB_UF, ctl_2),
+        ),
+        (
+            "model711::CTL_2::K_OF",
+            location(model711::Ctl::K_OF, ctl_2),
+        ),
+        (
+            "model711::CTL_2::K_UF",
+            location(model711::Ctl::K_UF, ctl_2),
+        ),
+        (
+            "model711::CTL_2::RSP_TMS",
+            location(model711::Ctl::RSP_TMS, ctl_2),
+        ),
+        (
+            "model711::CTL_2::READ_ONLY",
+            location(model711::Ctl::READ_ONLY, ctl_2),
+        ),
         (
             "model711::CTL_1::DB_OF",
             location(model711::Ctl::DB_OF, ctl_1),
-        ),
-        (
-            "model711::CTL_1::DB_UF",
-            location(model711::Ctl::DB_UF, ctl_1),
-        ),
-        (
-            "model711::CTL_1::K_OF",
-            location(model711::Ctl::K_OF, ctl_1),
-        ),
-        (
-            "model711::CTL_1::K_UF",
-            location(model711::Ctl::K_UF, ctl_1),
-        ),
-        (
-            "model711::CTL_1::RSP_TMS",
-            location(model711::Ctl::RSP_TMS, ctl_1),
-        ),
-        (
-            "model711::CTL_1::READ_ONLY",
-            location(model711::Ctl::READ_ONLY, ctl_1),
-        ),
-        (
-            "model711::CTL_0::DB_OF",
-            location(model711::Ctl::DB_OF, ctl_0),
         ),
     ] {
         locations.insert(name.into(), point_location);
