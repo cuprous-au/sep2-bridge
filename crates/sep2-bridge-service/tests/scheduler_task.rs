@@ -135,8 +135,8 @@ async fn emits_parameters() {
     match event {
         scheduler::Event::ParametersChanged(parameters) => {
             assert_eq!(parameters.num_active(), 2);
-            assert_eq!(parameters.set_grad_w, Some(set_grad_w));
-            assert_eq!(parameters.set_es_high_volt, Some(set_es_high_volt));
+            assert_eq!(parameters.inner.set_grad_w, Some(set_grad_w));
+            assert_eq!(parameters.inner.set_es_high_volt, Some(set_es_high_volt));
         }
         event => {
             panic!("Unexpected event {:?} from scheduler", event);
@@ -235,7 +235,7 @@ async fn produces_schedule_on_time() {
     assert_eq!(events.len(), 2);
     assert!(events.iter().any(|event| match event {
         scheduler::Event::ParametersChanged(parameters) => {
-            assert_eq!(parameters.base.op_mod_connect, Some(true));
+            assert_eq!(parameters.inner.der_control_base.op_mod_connect, Some(true));
             true
         }
         _ => false,
@@ -271,7 +271,7 @@ async fn produces_schedule_on_time() {
     assert_eq!(events.len(), 2);
     assert!(events.iter().any(|event| match event {
         scheduler::Event::ParametersChanged(parameters) => {
-            assert_eq!(parameters.base.op_mod_connect, None);
+            assert_eq!(parameters.inner.der_control_base.op_mod_connect, None);
             true
         }
         _ => false,
