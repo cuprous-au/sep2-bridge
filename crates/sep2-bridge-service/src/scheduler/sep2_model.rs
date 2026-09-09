@@ -4,7 +4,10 @@ use chrono::Utc;
 use rand::{RngExt, rngs::ThreadRng};
 use sep2_common::{
     packages::{
-        der::{DERControl, DERControlList, DERProgram, DERProgramList, DefaultDERControl},
+        der::{
+            DERControl, DERControlList, DERCurve, DERCurveList, DERProgram, DERProgramList,
+            DefaultDERControl,
+        },
         edev::EndDevice,
         fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
         identification::{Link, ListLink, ResponseRequired, ResponseStatus},
@@ -71,12 +74,14 @@ pub struct Sep2Model {
     function_set_assignments_lists: HashMap<String, MRIDList>,
     program_lists: HashMap<String, MRIDList>,
     control_lists: HashMap<String, MRIDList>,
+    curve_lists: HashMap<String, MRIDList>,
 
     // The individual resource definitions.
     end_devices: HashMap<String, EndDevice>,
     function_set_assignments: HashMap<MRIDType, FunctionSetAssignments>,
     programs: HashMap<MRIDType, DERProgram>,
     controls: HashMap<MRIDType, ScheduledControl>,
+    curves: HashMap<MRIDType, DERCurve>,
     // Note that default controls are linked by href and not mrid.
     default_controls: HashMap<String, DefaultDERControl>,
 }
@@ -114,6 +119,10 @@ impl Sep2Model {
             Sep2ResourceEvent::DERControlList(dercl) => {
                 generic_log_list(&dercl);
                 self.set_der_control_list(&dercl, &mut rng)
+            }
+            Sep2ResourceEvent::DERCurveList(curves) => {
+                generic_log_list(&curves);
+                self.set_der_curve_list(&curves)
             }
             Sep2ResourceEvent::DefaultDERControl(dderc) => self.set_default_der_control(&dderc),
         }
@@ -265,6 +274,12 @@ impl Sep2Model {
                     &incoming.default_der_control_link,
                     ResourceKind::DefaultDERControl,
                 ))
+                // Check DERCurveList for updates
+                .chain(link_update_events(
+                    &entry.get().der_curve_list_link,
+                    &incoming.der_curve_list_link,
+                    ResourceKind::DERCurveList,
+                ))
                 .collect();
 
                 entry.insert(incoming.clone());
@@ -292,7 +307,14 @@ impl Sep2Model {
                         .default_der_control_link,
                     ResourceKind::DefaultDERControl
                     )
-                ).collect();
+                )
+                // And its DERCurveList link
+                .chain(
+                    link_update_events(&None, &incoming.der_curve_list_link,
+                        ResourceKind::DERCurveList
+                    )
+                )
+                .collect();
 
                 entry.insert(incoming.clone());
 
@@ -462,6 +484,46 @@ impl Sep2Model {
         events
     }
 
+    /// Upsert a DERCurveList. Will upsert DERCurves too.
+    pub fn set_der_curve_list(self: &mut Sep2Model, incoming: &DERCurveList) -> Vec<Event> {
+        let href = safe_href(incoming);
+
+        let list = MRIDList {
+            items: incoming.der_curve.iter().map(|curve| curve.mrid).collect(),
+            poll_rate: None,
+            href: href.clone(),
+        };
+        self.curve_lists.insert(href.clone(), list);
+
+        // Apply all individual DERCurves and return their events
+        incoming
+            .der_curve
+            .iter()
+            .flat_map(|curve| self.set_der_curve(curve))
+            .collect()
+    }
+
+    /// Upsert a DERCurve.
+    pub fn set_der_curve(self: &mut Sep2Model, incoming: &DERCurve) -> Vec<Event> {
+        let mrid = incoming.mrid;
+        let href = safe_href(incoming);
+
+        match self.curves.entry(mrid) {
+            Entry::Occupied(mut entry) => {
+                entry.insert(incoming.clone());
+                Vec::new()
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(incoming.clone());
+                // Event that there is a new link.
+                vec![Event::LinkAdded {
+                    href: href.clone(),
+                    kind: ResourceKind::DERCurve,
+                }]
+            }
+        }
+    }
+
     /// Upsert the Time
     pub fn set_time(self: &mut Sep2Model, time: &Time) -> Vec<Event> {
         self.time = time.clone();
@@ -475,6 +537,13 @@ impl Sep2Model {
         self.end_devices
             .values()
             .find(|edev| edev.lfdi == Some(lfdi))
+    }
+
+    /// Find a curve by href rather than MRID.
+    pub fn get_curve_by_href(self: &Sep2Model, href: &str) -> Option<&DERCurve> {
+        self.curves
+            .values()
+            .find(|curve| curve.href.as_ref().is_some_and(|s| s == href))
     }
 
     /// Finds all controls and default controls for a single EndDevice from any

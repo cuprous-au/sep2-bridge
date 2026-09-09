@@ -1,21 +1,33 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use sep2_common::packages::der::{DERControlBase, DefaultDERControl};
+use sep2_common::packages::der::{DERControlBase, DERCurve, DefaultDERControl};
 
 use super::Event;
 
 /// The output of the scheduler, describing the set of controls to be applied to
 /// a device at a given instant in time.
+///
+/// The base controls include DERCurveLinks only. Each curve may be provided in
+/// the accompanying `curves` field, resolvable via the href field. If the curve
+/// is not present in the list, that implies its data is not known yet.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ControlAttributes {
     // The DefaultDERControl struct encompasses all possible 38 parameters (29
     // in DERControlBase, 9 in the DefaultDERControl struct itself).
     pub inner: DefaultDERControl,
+
+    pub curves: HashMap<String, DERCurve>,
 }
 
 impl ControlAttributes {
-    pub fn new(controls: DefaultDERControl) -> ControlAttributes {
-        ControlAttributes { inner: controls }
+    pub fn new(
+        controls: DefaultDERControl,
+        curves: HashMap<String, DERCurve>,
+    ) -> ControlAttributes {
+        ControlAttributes {
+            inner: controls,
+            curves,
+        }
     }
 
     /// Total distinct attributes that would be applied.
@@ -222,6 +234,31 @@ pub fn overlay_controls(first: DefaultDERControl, overlay: DefaultDERControl) ->
         set_soft_grad_w: first.set_soft_grad_w.or(overlay.set_soft_grad_w),
         ..Default::default()
     }
+}
+
+/// Return the hrefs of any curves specified in the attributes of the control.
+pub fn all_curve_hrefs(control: &DERControlBase) -> Vec<&str> {
+    [
+        &control.op_mod_freq_watt,
+        &control.op_mod_hfrt_may_trip,
+        &control.op_mod_hfrt_must_trip,
+        &control.op_mod_lfrt_may_trip,
+        &control.op_mod_lfrt_must_trip,
+        &control.op_mod_hvrt_may_trip,
+        &control.op_mod_hvrt_must_trip,
+        &control.op_mod_hvrt_momentary_cessation,
+        &control.op_mod_lvrt_may_trip,
+        &control.op_mod_lvrt_must_trip,
+        &control.op_mod_lvrt_momentary_cessation,
+        &control.op_mod_volt_var,
+        &control.op_mod_volt_watt,
+        &control.op_mod_watt_pf,
+        &control.op_mod_watt_var,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|curve| curve.href.as_str())
+    .collect()
 }
 
 #[cfg(test)]
@@ -464,9 +501,9 @@ mod tests {
         fn test_active_attribute_count_consistency(controls1 in arb_default_der_control(), controls2 in arb_default_der_control()) {
             let merged = overlay_controls(controls1.clone(), controls2.clone());
             // Convert to a ControlAttributes struct to easily calculate the number of active controls.
-            let ca1 = ControlAttributes::new(controls1);
-            let ca2 = ControlAttributes::new(controls2);
-            let ca_merged = ControlAttributes::new(merged);
+            let ca1 = ControlAttributes::new(controls1, HashMap::new());
+            let ca2 = ControlAttributes::new(controls2, HashMap::new());
+            let ca_merged = ControlAttributes::new(merged, HashMap::new());
             let n1 = ca1.num_active();
             let n2 = ca2.num_active();
             let n_merged = ca_merged.num_active();

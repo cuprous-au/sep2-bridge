@@ -9,8 +9,8 @@ use sep2_common::{
     packages::{
         dcap::DeviceCapability,
         der::{
-            DER, DERCapability, DERControlList, DERList, DERProgramList, DERSettings, DERStatus,
-            DefaultDERControl,
+            DER, DERCapability, DERControlList, DERCurveList, DERList, DERProgramList, DERSettings,
+            DERStatus, DefaultDERControl,
         },
         edev::{EndDevice, EndDeviceList, Registration},
         fsa::FunctionSetAssignmentsList,
@@ -53,6 +53,7 @@ pub enum Sep2ResourceEvent {
     DERProgramList(Arc<DERProgramList>),
     DefaultDERControl(Arc<DefaultDERControl>),
     DERControlList(Arc<DERControlList>),
+    DERCurveList(Arc<DERCurveList>),
 }
 
 impl From<EndDeviceList> for Sep2ResourceEvent {
@@ -78,6 +79,11 @@ impl From<DefaultDERControl> for Sep2ResourceEvent {
 impl From<DERControlList> for Sep2ResourceEvent {
     fn from(resource: DERControlList) -> Self {
         Sep2ResourceEvent::DERControlList(Arc::new(resource))
+    }
+}
+impl From<DERCurveList> for Sep2ResourceEvent {
+    fn from(resource: DERCurveList) -> Self {
+        Sep2ResourceEvent::DERCurveList(Arc::new(resource))
     }
 }
 impl From<Time> for Sep2ResourceEvent {
