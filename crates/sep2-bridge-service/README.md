@@ -1,6 +1,17 @@
 sep2-bridge-service
 ===
 
+## Alignment with AS5438
+
+This crate is strongly motivated by the draft spec of AS5438 and is aimed at
+supporting devices that implement all of the control parameters mentioned in the
+tables of that spec.
+
+In order to correctly send those parameters to a SunSpec Modbus-compatible
+device, several other parameters not mentioned in AS5438 are also required. The
+details of the changes made to be compatible with AS5438 are described in
+[AS5438_comments](docs/AS5438_comments.md).
+
 ## Testing with envoy
 
 Envoy is a CSIP-AUS server developed by the BSGIP at ANU. We can use it here to

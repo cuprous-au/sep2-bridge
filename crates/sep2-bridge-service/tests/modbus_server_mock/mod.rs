@@ -12,6 +12,8 @@ use sunspec::models::model701::{self, Model701};
 use sunspec::models::model702::Model702;
 use sunspec::models::model703::{self, Model703};
 use sunspec::models::model704::{self, Model704};
+use sunspec::models::model707::{self, Model707};
+use sunspec::models::model708::{self, Model708};
 use sunspec::models::model709::{self, Model709};
 use sunspec::models::model710::{self, Model710};
 use sunspec::models::model711::{self, Model711};
@@ -293,6 +295,12 @@ fn initialise_registers(registers: &mut [u16], enabled_models: Option<&[u32]>) -
         if enabled_models.is_none_or(|v| v.contains(&704)) {
             offset = add_model_704(registers, offset, &mut locations);
         }
+        if enabled_models.is_none_or(|v| v.contains(&707)) {
+            offset = add_model_707(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&708)) {
+            offset = add_model_708(registers, offset, &mut locations);
+        }
         if enabled_models.is_none_or(|v| v.contains(&709)) {
             offset = add_model_709(registers, offset, &mut locations);
         }
@@ -538,6 +546,154 @@ pub fn add_model_704(
     locations.insert(
         "model704::W_SET_SF".into(),
         location(Model704::W_SET_SF, offset),
+    );
+
+    offset + usize::from(length)
+}
+
+/// Appends Model 707 (DER Trip low voltage)
+///
+/// This model contains curves which are a repeating group, and these themselves
+/// contain points which are repeating groups.
+pub fn add_model_707(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    let n_crv_set = 2;
+    let n_pt = 4;
+
+    // Assuming MustTrip, MayTrip, MomCess are all the same layout.
+    let curve_len = model707::MustTrip::LEN + model707::Pt::LEN * n_pt;
+    let crv_set_len = model707::Crv::LEN + 3 * curve_len;
+    let length = Model707::LEN + crv_set_len * n_crv_set;
+
+    registers[base_offset] = Model707::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+
+    Model707::ENA.fill_registers(registers, offset, model707::Ena::Disabled);
+    locations.insert("model707::ENA".into(), location(Model707::ENA, offset));
+    Model707::ADPT_CRV_REQ.fill_registers(registers, offset, 1);
+    locations.insert(
+        "model707::ADPT_CRV_REQ".into(),
+        location(Model707::ADPT_CRV_REQ, offset),
+    );
+    Model707::N_PT.fill_registers(registers, offset, n_pt);
+    locations.insert("model707::N_PT".into(), location(Model707::N_PT, offset));
+    Model707::N_CRV_SET.fill_registers(registers, offset, n_crv_set);
+    locations.insert(
+        "model707::N_CRV_SET".into(),
+        location(Model707::N_CRV_SET, offset),
+    );
+    Model707::V_SF.fill_registers(registers, offset, 1);
+    locations.insert("model707::V_SF".into(), location(Model707::V_SF, offset));
+    Model707::TMS_SF.fill_registers(registers, offset, 2);
+    locations.insert(
+        "model707::TMS_SF".into(),
+        location(Model707::TMS_SF, offset),
+    );
+
+    // Ensure the 1st curve is readonly
+    model707::Crv::READ_ONLY.fill_registers(
+        registers,
+        offset + usize::from(Model707::LEN),
+        model707::CrvReadOnly::R,
+    );
+
+    // Skip to the 2nd curve set.
+    let crv_offset = offset + usize::from(Model707::LEN + crv_set_len);
+    // Skip past the READ_ONLY point to reach the curves themselves.
+    let must_trip_offset = crv_offset + usize::from(model707::Crv::LEN);
+    let may_trip_offset = must_trip_offset + usize::from(curve_len);
+    let mom_cess_offset = may_trip_offset + usize::from(curve_len);
+    // Don't fill any curve data but just record the locations so we can look up values later.
+    locations.insert(
+        "model707::CRV_2_MUST_TRIP".into(),
+        location(model707::MustTrip::ACT_PT, must_trip_offset),
+    );
+    locations.insert(
+        "model707::CRV_2_MAY_TRIP".into(),
+        location(model707::MayTrip::ACT_PT, may_trip_offset),
+    );
+    locations.insert(
+        "model707::CRV_2_MOM_CESS".into(),
+        location(model707::MomCess::ACT_PT, mom_cess_offset),
+    );
+
+    offset + usize::from(length)
+}
+
+/// Appends Model 708 (DER Trip high voltage)
+///
+/// This model contains curves which are a repeating group, and these themselves
+/// contain points which are repeating groups.
+pub fn add_model_708(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    let n_crv_set = 2;
+    let n_pt = 4;
+
+    // Assuming MustTrip, MayTrip, MomCess are all the same layout.
+    let curve_len = model708::MustTrip::LEN + model708::Pt::LEN * n_pt;
+    let crv_set_len = model708::Crv::LEN + 3 * curve_len;
+    let length = Model708::LEN + crv_set_len * n_crv_set;
+
+    registers[base_offset] = Model708::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+
+    Model708::ENA.fill_registers(registers, offset, model708::Ena::Disabled);
+    locations.insert("model708::ENA".into(), location(Model708::ENA, offset));
+    Model708::ADPT_CRV_REQ.fill_registers(registers, offset, 1);
+    locations.insert(
+        "model708::ADPT_CRV_REQ".into(),
+        location(Model708::ADPT_CRV_REQ, offset),
+    );
+    Model708::N_PT.fill_registers(registers, offset, n_pt);
+    locations.insert("model708::N_PT".into(), location(Model708::N_PT, offset));
+    Model708::N_CRV_SET.fill_registers(registers, offset, n_crv_set);
+    locations.insert(
+        "model708::N_CRV_SET".into(),
+        location(Model708::N_CRV_SET, offset),
+    );
+    Model708::V_SF.fill_registers(registers, offset, 1);
+    locations.insert("model708::V_SF".into(), location(Model708::V_SF, offset));
+    Model708::TMS_SF.fill_registers(registers, offset, 2);
+    locations.insert(
+        "model708::TMS_SF".into(),
+        location(Model708::TMS_SF, offset),
+    );
+
+    // Ensure the 1st curve is readonly
+    model708::Crv::READ_ONLY.fill_registers(
+        registers,
+        offset + usize::from(Model708::LEN),
+        model708::CrvReadOnly::R,
+    );
+
+    // Skip to the 2nd curve set.
+    let crv_offset = offset + usize::from(Model708::LEN + crv_set_len);
+    // Skip past the READ_ONLY point to reach the curves themselves.
+    let must_trip_offset = crv_offset + usize::from(model708::Crv::LEN);
+    let may_trip_offset = must_trip_offset + usize::from(curve_len);
+    let mom_cess_offset = may_trip_offset + usize::from(curve_len);
+    // Don't fill any curve data but just record the locations so we can look up values later.
+    locations.insert(
+        "model708::CRV_2_MUST_TRIP".into(),
+        location(model708::MustTrip::ACT_PT, must_trip_offset),
+    );
+    locations.insert(
+        "model708::CRV_2_MAY_TRIP".into(),
+        location(model708::MayTrip::ACT_PT, may_trip_offset),
+    );
+    locations.insert(
+        "model708::CRV_2_MOM_CESS".into(),
+        location(model708::MomCess::ACT_PT, mom_cess_offset),
     );
 
     offset + usize::from(length)

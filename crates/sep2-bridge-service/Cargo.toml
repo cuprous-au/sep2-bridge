@@ -16,7 +16,7 @@ num-traits.workspace = true
 rand.workspace = true
 sep2_client = { workspace = true, features = ["all"] }
 sep2_common = { workspace = true, features = ["all"] }
-sunspec = { workspace = true, default-features = false, features = ["tokio-modbus", "model1", "model103", "model701", "model702", "model703", "model704", "model709", "model710", "model711", "model713"] }
+sunspec = { workspace = true, default-features = false, features = ["tokio-modbus", "model1", "model103", "model701", "model702", "model703", "model704", "model707", "model708", "model709", "model710", "model711", "model713"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-modbus.workspace = true
 url.workspace = true
