@@ -15,7 +15,7 @@ use sep2_common::{
     packages::{
         der::{
             CurveData, DERControl, DERControlBase, DERControlList, DERCurve, DERCurveList,
-            DERProgram, DERProgramList, DefaultDERControl, FreqDroopType,
+            DERProgram, DERProgramList, DERUnitRefType, DefaultDERControl, FreqDroopType,
         },
         fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
         identification::{Link, ListLink},
@@ -29,7 +29,9 @@ use sep2_common::{
 };
 use sunspec::{
     Group, Value,
-    models::{model703, model704, model707, model708, model709, model710, model711},
+    models::{
+        model703, model704, model705, model706, model707, model708, model709, model710, model711,
+    },
 };
 use tokio::{
     sync::mpsc,
@@ -64,6 +66,8 @@ const HREF_LVRT_MUST_TRIP_CURVE: &str = "/dc/3";
 const HREF_LVRT_MOM_CESS_CURVE: &str = "/dc/4";
 const HREF_HVRT_MUST_TRIP_CURVE: &str = "/dc/5";
 const HREF_HVRT_MOM_CESS_CURVE: &str = "/dc/6";
+const HREF_VOLT_WATT_CURVE: &str = "/dc/7";
+const HREF_VOLT_VAR_CURVE: &str = "/dc/8";
 
 // The values to be mocked and verified. Table numbers from AS5438.
 //
@@ -74,6 +78,30 @@ const HREF_HVRT_MOM_CESS_CURVE: &str = "/dc/6";
 
 // Values for all tables
 const EXPECTED_ADPT_CRV_REQ: u16 = 2;
+
+// Table 4.
+const OP_MOD_VOLT_VAR_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_VOLT_VAR_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_VOLT_VAR_DATA: &[(i32, i32)] = &[(27, 28), (29, 30)];
+const OP_MOD_VOLT_VAR_TMS: u16 = 3100;
+const OP_MOD_VOLT_VAR_Y_REF: DERUnitRefType = DERUnitRefType::SetMaxVar;
+const OP_MOD_VOLT_VAR_V_REF: u16 = 3200;
+const OP_MOD_VOLT_VAR_V_REF_AUTO_TMS: u32 = 3300;
+const EXPECTED_DER_VOLT_VAR_DATA: &[(u16, i16)] = &[(2700, 280), (2900, 300)];
+const EXPECTED_DER_VOLT_VAR_TMS: u32 = 31;
+const EXPECTED_DER_VOLT_VAR_Y_REF: model705::CrvDeptRef = model705::CrvDeptRef::VarMaxPct;
+const EXPECTED_DER_VOLT_VAR_V_REF: u16 = 3;
+const EXPECTED_DER_VOLT_VAR_V_REF_AUTO_TMS: u16 = 33;
+
+// Table 6.
+const OP_MOD_VOLT_WATT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_VOLT_WATT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_VOLT_WATT_DATA: &[(i32, i32)] = &[(23, 24), (25, 26)];
+const OP_MOD_VOLT_WATT_TMS: u16 = 2700;
+const OP_MOD_VOLT_WATT_Y_REF: DERUnitRefType = DERUnitRefType::SetMaxW;
+const EXPECTED_DER_VOLT_WATT_DATA: &[(u16, i16)] = &[(2300, 240), (2500, 260)];
+const EXPECTED_DER_VOLT_WATT_TMS: u32 = 27;
+const EXPECTED_DER_VOLT_WATT_Y_REF: model706::CrvDeptRef = model706::CrvDeptRef::WMaxPct;
 
 // Table 7. Note that SEP2 and Sunspec choose the opposite ordering for the x/y
 // axes in these cases.
@@ -310,6 +338,76 @@ async fn applies_as5438_table_7() {
         "model708::CRV_2_MOM_CESS",
         EXPECTED_DER_TRIP_HV_MOM_CESS_DATA,
         model708::MomCess::LEN,
+    )
+    .await;
+}
+
+/// Tests that an active DERControl's opModVoltWatt reaches model 706.
+/// (AS5438 - Table 6)
+#[tokio::test]
+async fn applies_as5438_table_6() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    // The function is enabled
+    assert_register(&mock, "model706::ENA", model706::Ena::Enabled).await;
+    // And the requested curve should have been updated.
+    assert_register(&mock, "model706::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    // And the TMS is filled
+    assert_register(&mock, "model706::CRV_2_RSP_TMS", EXPECTED_DER_VOLT_WATT_TMS).await;
+    // And the dependent reference for the y axis.
+    assert_register(
+        &mock,
+        "model706::CRV_2_DEPT_REF",
+        EXPECTED_DER_VOLT_WATT_Y_REF,
+    )
+    .await;
+    // And the curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model706::CRV_2_ACT_PT",
+        EXPECTED_DER_VOLT_WATT_DATA,
+        model706::Crv::LEN,
+    )
+    .await;
+}
+
+/// Tests that an active DERControl's opModVoltVar reaches model 705.
+/// (AS5438 - Table 4)
+#[tokio::test]
+async fn applies_as5438_table_4() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    // The function is enabled
+    assert_register(&mock, "model705::ENA", model705::Ena::Enabled).await;
+    // And the requested curve should have been updated.
+    assert_register(&mock, "model705::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    // And the other parameters are filled
+    assert_register(&mock, "model705::CRV_2_RSP_TMS", EXPECTED_DER_VOLT_VAR_TMS).await;
+    assert_register(
+        &mock,
+        "model705::CRV_2_DEPT_REF",
+        EXPECTED_DER_VOLT_VAR_Y_REF,
+    )
+    .await;
+    assert_register(&mock, "model705::CRV_2_V_REF", EXPECTED_DER_VOLT_VAR_V_REF).await;
+    assert_register(
+        &mock,
+        "model705::CRV_2_V_REF_AUTO_ENA",
+        model705::CrvVRefAutoEna::Enabled,
+    )
+    .await;
+    assert_register(
+        &mock,
+        "model705::CRV_2_V_REF_AUTO_TMS",
+        EXPECTED_DER_VOLT_VAR_V_REF_AUTO_TMS,
+    )
+    .await;
+    // And the curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model705::CRV_2_ACT_PT",
+        EXPECTED_DER_VOLT_VAR_DATA,
+        model705::Crv::LEN,
     )
     .await;
 }
@@ -674,6 +772,12 @@ async fn setup_control_mocks(mock: &MockServer) {
             op_mod_hvrt_momentary_cessation: Some(Link {
                 href: HREF_HVRT_MOM_CESS_CURVE.into(),
             }),
+            op_mod_volt_watt: Some(Link {
+                href: HREF_VOLT_WATT_CURVE.into(),
+            }),
+            op_mod_volt_var: Some(Link {
+                href: HREF_VOLT_VAR_CURVE.into(),
+            }),
             ..Default::default()
         },
 
@@ -799,6 +903,48 @@ async fn setup_control_mocks(mock: &MockServer) {
         y_multiplier: OP_MOD_HVRT_SF_Y,
         ..Default::default()
     };
+
+    let volt_watt_curve = DERCurve {
+        href: Some(HREF_VOLT_WATT_CURVE.into()),
+        mrid: MRIDType(1007),
+
+        curve_data: OP_MOD_VOLT_WATT_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_VOLT_WATT_SF_X,
+        y_multiplier: OP_MOD_VOLT_WATT_SF_Y,
+        y_ref_type: OP_MOD_VOLT_WATT_Y_REF,
+        open_loop_tms: Some(Uint16(OP_MOD_VOLT_WATT_TMS)),
+        ..Default::default()
+    };
+
+    let volt_var_curve = DERCurve {
+        href: Some(HREF_VOLT_VAR_CURVE.into()),
+        mrid: MRIDType(1008),
+
+        curve_data: OP_MOD_VOLT_VAR_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_VOLT_VAR_SF_X,
+        y_multiplier: OP_MOD_VOLT_VAR_SF_Y,
+        y_ref_type: OP_MOD_VOLT_VAR_Y_REF,
+        open_loop_tms: Some(Uint16(OP_MOD_VOLT_VAR_TMS)),
+        v_ref: Percent::new(OP_MOD_VOLT_VAR_V_REF),
+        autonomous_v_ref_enable: Some(true),
+        autonomous_v_ref_time_constant: Some(Uint32(OP_MOD_VOLT_VAR_V_REF_AUTO_TMS)),
+        ..Default::default()
+    };
+
     mock_resource(
         mock,
         HREF_CURVEL,
@@ -811,10 +957,12 @@ async fn setup_control_mocks(mock: &MockServer) {
                 lvrt_mom_cess_curve,
                 hvrt_must_trip_curve,
                 hvrt_mom_cess_curve,
+                volt_watt_curve,
+                volt_var_curve,
             ],
 
-            all: Uint32(6),
-            results: Uint32(6),
+            all: Uint32(8),
+            results: Uint32(8),
         },
     )
     .await;

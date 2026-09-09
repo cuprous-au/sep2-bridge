@@ -52,6 +52,24 @@ table to table in the length of the curve and the choice of index. It is assumed
 that AS5438 simply means "a set of curve data points with x and y values" for
 each of these tables.
 
+## DeptRef of Tables E.4 and E.6 (Sections E.4.2 and E.4.4)
+
+These two tables refer to models 705 and 706. In these curves, the dependent
+axis (the y axis) is a percentage and is supposed to be assigned relative to the
+dependent reference, point `DEPT_REF`. The tables of AS5438 do not mention this,
+so we choose to map the SEP2 values for `DERCurve::y_ref_type` to `DEPT_REF`.
+
+## Table E.4 (Section E.4.2)
+
+This table references `705.VRef`, `705.VRefAutoEna`, `705.VRefAutoTms` and
+`705.RspTms` as though they are model parameters. These are instead specific to
+the curve SunSpec group and sent along with the curve data in curve 2.
+
+## Table E.6 (Section E.4.4)
+
+This table references model 706 for one point but 705 for the others. It is
+assumed this is a typo and the curve applies only to model 706.
+
 ## Table E.9 (Section E.4.7)
 
 The frequency droop SunSpec group is a repeating group `711.Ctl`. This follows a
