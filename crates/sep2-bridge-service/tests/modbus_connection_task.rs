@@ -98,11 +98,11 @@ async fn rescales_parameters_to_device_scale_factors() {
         mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
         Some(-250)
     );
-    assert_eq!(mock.get_value::<u32>("model711::CTL_1::DB_OF"), 100);
-    assert_eq!(mock.get_value::<u32>("model711::CTL_1::DB_UF"), 50);
-    assert_eq!(mock.get_value::<u16>("model711::CTL_1::K_OF"), 500);
-    assert_eq!(mock.get_value::<u16>("model711::CTL_1::K_UF"), 400);
-    assert_eq!(mock.get_value::<u32>("model711::CTL_1::RSP_TMS"), 5);
+    assert_eq!(mock.get_value::<u32>("model711::CTL_2::DB_OF"), 100);
+    assert_eq!(mock.get_value::<u32>("model711::CTL_2::DB_UF"), 50);
+    assert_eq!(mock.get_value::<u16>("model711::CTL_2::K_OF"), 500);
+    assert_eq!(mock.get_value::<u16>("model711::CTL_2::K_UF"), 400);
+    assert_eq!(mock.get_value::<u32>("model711::CTL_2::RSP_TMS"), 5);
     assert_eq!(
         mock.get_value::<model711::Ena>("model711::ENA"),
         model711::Ena::Enabled

@@ -10,6 +10,8 @@ use sunspec::{
         model702::{CtrlModes, Model702},
         model703::{self, Model703},
         model704::{self, Model704},
+        model709::{self, Model709},
+        model710::{self, Model710},
         model711::{self, Model711},
         model713::Model713,
     },
@@ -48,6 +50,10 @@ pub enum Command {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Parameters {
+    // AS5438 - Table E.8, Section E.4.6
+    pub der_trip_lf: Option<Curve<u32, u32>>,
+    pub der_trip_hf: Option<Curve<u32, u32>>,
+
     // AS5438 - Table E.9, Section E.4.7
     pub droop_ctl: Option<Model711Ctl>,
 
@@ -82,6 +88,32 @@ pub struct Model711Ctl {
     pub k_of: ScaledValue<u16>,
     pub k_uf: ScaledValue<u16>,
     pub rsp_tms: ScaledValue<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Curve<TX, TY> {
+    pub points: Vec<(TX, TY)>,
+    pub sf_x: i16,
+    pub sf_y: i16,
+}
+
+impl<TX: ScaledValueInner, TY: ScaledValueInner> Curve<TX, TY> {
+    /// Returns an iterator over the points as ScaledValues including the scaling factor.
+    pub fn iter_scaled(&self) -> impl Iterator<Item = (ScaledValue<TX>, ScaledValue<TY>)> {
+        self.points.iter().map(|(x, y)| {
+            (
+                ScaledValue::new(*x, self.sf_x),
+                ScaledValue::new(*y, self.sf_y),
+            )
+        })
+    }
+
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> u16 {
+        // We never expect more points than a few. To avoid type errors we
+        // convert safely and clamp this to maximum if it's overflowing.
+        u16::try_from(self.points.len()).unwrap_or(u16::MAX)
+    }
 }
 
 // We ensure the loop wakes regularly to make progress on what it needs to do,
@@ -512,6 +544,8 @@ async fn send_new_parameters(
 ) -> Result<()> {
     send_model703_parameters(device, parameters).await?;
     send_model704_parameters(device, parameters).await?;
+    send_model709_parameters(device, parameters).await?;
+    send_model710_parameters(device, parameters).await?;
     send_model711_parameters(device, parameters).await?;
 
     Ok(())
@@ -654,6 +688,60 @@ async fn send_model704_parameters(
     Ok(())
 }
 
+async fn send_model709_parameters(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+) -> Result<()> {
+    if !device.models.supported_model_ids().contains(&709) {
+        return Ok(());
+    }
+
+    // AS5438 - Table E.8, Section E.4.6
+    let wrote_curve =
+        Model709::write_curves(device, parameters.der_trip_lf.as_ref(), None, None).await?;
+
+    device
+        .write_point(
+            Model709::ENA,
+            if wrote_curve {
+                model709::Ena::Enabled
+            } else {
+                model709::Ena::Disabled
+            },
+        )
+        .await
+        .map_err(comm_err)?;
+
+    Ok(())
+}
+
+async fn send_model710_parameters(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+) -> Result<()> {
+    if !device.models.supported_model_ids().contains(&710) {
+        return Ok(());
+    }
+
+    // AS5438 - Table E.8, Section E.4.6
+    let wrote_curve =
+        Model710::write_curves(device, parameters.der_trip_hf.as_ref(), None, None).await?;
+
+    device
+        .write_point(
+            Model710::ENA,
+            if wrote_curve {
+                model710::Ena::Enabled
+            } else {
+                model710::Ena::Disabled
+            },
+        )
+        .await
+        .map_err(comm_err)?;
+
+    Ok(())
+}
+
 async fn send_model711_parameters(
     device: &AsyncDevice<TokioModbusContext>,
     parameters: &Parameters,
@@ -737,4 +825,233 @@ async fn send_model711_parameters(
         .map_err(comm_err)?;
 
     Ok(())
+}
+
+/// Helper trait to avoid typos when calculating curve offsets.
+///
+/// A user of this trait should implement it for a given model (e.g. Model710)
+/// and define the associated types and constants. The `write_curves` function
+/// should then fill in the necessary curve data and requested curve to adopt.
+///
+/// A trip curve model has 3 curves inside each curve set for MustTrip, MayTrip
+/// and MomCess.
+trait TripCurveModel<TX, TY>
+where
+    Self: Model,
+    TX: ScaledValueInner + FixedSize,
+    TY: ScaledValueInner + FixedSize,
+{
+    type GCrv: Group;
+    type GMustTrip: Group;
+    type GMayTrip: Group;
+    type GMomCess: Group;
+    type GPt: Group;
+    const ADPT_CRV_REQ: Point<Self, u16>;
+    const N_CRV_SET: Point<Self, u16>;
+    const N_PT: Point<Self, u16>;
+    const X_SF: Point<Self, i16>;
+    const Y_SF: Point<Self, i16>;
+    // Note that CRV_ACT_PT must be the same between all 3 curves, so we pick
+    // GMustTrip here.
+    const CRV_ACT_PT: Point<Self::GMustTrip, Option<u16>>;
+    const X_PT: Point<Self::GPt, Option<TX>>;
+    const Y_PT: Point<Self::GPt, Option<TY>>;
+
+    // Curve set 1 is defined to be read-only in Sunspec so we require at least
+    // two curves to be able to write a new control. We use this const to make the
+    // intent clearer where it is used.
+    const TARGET_CURVE_SET: u16 = 2;
+
+    fn curve_set_len(n_pt: u16) -> u16 {
+        Self::GCrv::LEN
+            + Self::curve_len(TripCurve::MustTrip, n_pt)
+            + Self::curve_len(TripCurve::MayTrip, n_pt)
+            + Self::curve_len(TripCurve::MomCess, n_pt)
+    }
+
+    fn curve_static_len(curve: TripCurve) -> u16 {
+        match curve {
+            TripCurve::MustTrip => Self::GMustTrip::LEN,
+            TripCurve::MayTrip => Self::GMayTrip::LEN,
+            TripCurve::MomCess => Self::GMomCess::LEN,
+        }
+    }
+
+    fn curve_len(curve: TripCurve, n_pt: u16) -> u16 {
+        Self::curve_static_len(curve) + Self::GPt::LEN * n_pt
+    }
+
+    /// The offset of a curve inside the curve set. `curve_set_index` follows 1-based indexing.
+    fn curve_offset(curve: TripCurve, curve_set_index: u16, n_pt: u16) -> u16 {
+        let curve_set_offset = Self::LEN + Self::curve_set_len(n_pt) * (curve_set_index - 1);
+        let additional_offset = match curve {
+            TripCurve::MustTrip => Self::GCrv::LEN,
+            TripCurve::MayTrip => Self::GCrv::LEN + Self::curve_len(TripCurve::MustTrip, n_pt),
+            TripCurve::MomCess => {
+                Self::GCrv::LEN
+                    + Self::curve_len(TripCurve::MustTrip, n_pt)
+                    + Self::curve_len(TripCurve::MayTrip, n_pt)
+            }
+        };
+        curve_set_offset + additional_offset
+    }
+
+    /// Write a single curve to its offset location, returning true if the curve was written or not.
+    ///
+    /// This function should only be called internally by write_curves. It
+    /// assumes that n_curves has already been checked for valid length.
+    async fn write_curve(
+        device: &AsyncDevice<TokioModbusContext>,
+        curve: TripCurve,
+        curve_data: &Curve<TX, TY>,
+        n_pt: u16,
+        x_sf: i16,
+        y_sf: i16,
+    ) -> Result<bool> {
+        if curve_data.len() > n_pt {
+            log::warn!(
+                "Curve data is longer ({}) than the length supported by the device ({}) in model {}.",
+                curve_data.len(),
+                n_pt,
+                Self::ID
+            );
+            return Ok(false);
+        }
+
+        let curve_addr = Self::addr(&device.models).addr
+            + Self::curve_offset(curve, Self::TARGET_CURVE_SET, n_pt);
+
+        // Write the number of active points first.
+        write_offset_point(device, curve_addr, Self::CRV_ACT_PT, Some(curve_data.len())).await?;
+
+        for (i, point) in curve_data.iter_scaled().enumerate() {
+            let point_addr =
+                curve_addr + Self::curve_static_len(curve) + Self::GPt::LEN * (i as u16);
+            write_offset_point(
+                device,
+                point_addr,
+                Self::X_PT,
+                Some(point.0.rescale(x_sf).value),
+            )
+            .await?;
+            write_offset_point(
+                device,
+                point_addr,
+                Self::Y_PT,
+                Some(point.1.rescale(y_sf).value),
+            )
+            .await?;
+        }
+
+        Ok(true)
+    }
+
+    /// Writes up to 3 curves if they are present in the arguments, filling in
+    /// the AdptCrvReq register as well and returning true if any curve was
+    /// written or false if not.
+    async fn write_curves(
+        device: &AsyncDevice<TokioModbusContext>,
+        must_trip_data: Option<&Curve<TX, TY>>,
+        may_trip_data: Option<&Curve<TX, TY>>,
+        mom_cess_data: Option<&Curve<TX, TY>>,
+    ) -> Result<bool> {
+        let wrote_any = {
+            // Short circuit quickly if no models are set so we don't read from the model unnecessarily.
+            if must_trip_data.is_none() && may_trip_data.is_none() && mom_cess_data.is_none() {
+                false
+            } else {
+                let n_curves = device.read_point(Self::N_CRV_SET).await.map_err(comm_err)?;
+                let n_pt = device.read_point(Self::N_PT).await.map_err(comm_err)?;
+
+                if n_curves < Self::TARGET_CURVE_SET {
+                    log::warn!(
+                        "Unable to write curve to model {} because the device does not support at least {} curves.",
+                        Self::ID,
+                        Self::TARGET_CURVE_SET
+                    );
+                    false
+                } else {
+                    let x_sf = device.read_point(Self::X_SF).await.map_err(comm_err)?;
+                    let y_sf = device.read_point(Self::Y_SF).await.map_err(comm_err)?;
+
+                    let wrote_must_trip = if let Some(data) = must_trip_data {
+                        Self::write_curve(device, TripCurve::MustTrip, data, n_pt, x_sf, y_sf)
+                            .await?
+                    } else {
+                        false
+                    };
+                    let wrote_may_trip = if let Some(data) = may_trip_data {
+                        Self::write_curve(device, TripCurve::MayTrip, data, n_pt, x_sf, y_sf)
+                            .await?
+                    } else {
+                        false
+                    };
+                    let wrote_mom_cess = if let Some(data) = mom_cess_data {
+                        Self::write_curve(device, TripCurve::MomCess, data, n_pt, x_sf, y_sf)
+                            .await?
+                    } else {
+                        false
+                    };
+
+                    wrote_must_trip || wrote_may_trip || wrote_mom_cess
+                }
+            }
+        };
+
+        if wrote_any {
+            device
+                .write_point(Self::ADPT_CRV_REQ, Self::TARGET_CURVE_SET)
+                .await
+                .map_err(comm_err)?;
+
+            // Note that we never check the result emitted in ADPT_CURV_RSLT.
+            // This is intentional, as there is nothing for us to do other than
+            // warn on it. There is no mechanism for us to respond upstream
+            // about a failure and we should continue trying to apply a curve
+            // even if there's a failure.
+        }
+
+        Ok(wrote_any)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TripCurve {
+    MustTrip,
+    MayTrip,
+    MomCess,
+}
+
+impl TripCurveModel<u32, u32> for Model709 {
+    type GCrv = model709::Crv;
+    type GMustTrip = model709::MustTrip;
+    type GMayTrip = model709::MayTrip;
+    type GMomCess = model709::MomCess;
+    type GPt = model709::Pt;
+
+    const ADPT_CRV_REQ: Point<Self, u16> = Self::ADPT_CRV_REQ;
+    const N_CRV_SET: Point<Self, u16> = Self::N_CRV_SET;
+    const N_PT: Point<Self, u16> = Self::N_PT;
+    const X_SF: Point<Self, i16> = Self::HZ_SF;
+    const Y_SF: Point<Self, i16> = Self::TMS_SF;
+    const CRV_ACT_PT: Point<Self::GMustTrip, Option<u16>> = model709::MustTrip::ACT_PT;
+    const X_PT: Point<Self::GPt, Option<u32>> = model709::Pt::HZ;
+    const Y_PT: Point<Self::GPt, Option<u32>> = model709::Pt::TMS;
+}
+
+impl TripCurveModel<u32, u32> for Model710 {
+    type GCrv = model710::Crv;
+    type GMustTrip = model710::MustTrip;
+    type GMayTrip = model710::MayTrip;
+    type GMomCess = model710::MomCess;
+    type GPt = model710::Pt;
+
+    const ADPT_CRV_REQ: Point<Self, u16> = Self::ADPT_CRV_REQ;
+    const N_CRV_SET: Point<Self, u16> = Self::N_CRV_SET;
+    const N_PT: Point<Self, u16> = Self::N_PT;
+    const X_SF: Point<Self, i16> = Self::HZ_SF;
+    const Y_SF: Point<Self, i16> = Self::TMS_SF;
+    const CRV_ACT_PT: Point<Self::GMustTrip, Option<u16>> = model710::MustTrip::ACT_PT;
+    const X_PT: Point<Self::GPt, Option<u32>> = model710::Pt::HZ;
+    const Y_PT: Point<Self::GPt, Option<u32>> = model710::Pt::TMS;
 }
