@@ -313,6 +313,42 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
             .and_then(get_curve_data);
 
         Ok(ModbusParameters {
+            // AS5438 - Table F.3 to E.3
+            pfw_inj_ena: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_pf_inject_w
+                .is_some()
+                .convert(),
+            pfw_inj_pf: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_pf_inject_w
+                .as_ref()
+                .map(|pfw| ScaledValue::new(pfw.displacement.convert(), pfw.multiplier.convert())),
+            pfw_inj_ext: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_pf_inject_w
+                .map(|pfw| pfw.excitation.convert()),
+            pfw_abs_ena: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_pf_absorb_w
+                .is_some()
+                .convert(),
+            pfw_abs_pf: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_pf_absorb_w
+                .as_ref()
+                .map(|pfw| ScaledValue::new(pfw.displacement.convert(), pfw.multiplier.convert())),
+            pfw_abs_ext: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_pf_absorb_w
+                .map(|pfw| pfw.excitation.convert()),
+
             // AS5438 - Table F.4 to E.4
             der_volt_var: der_volt_var_curve
                 .clone()
@@ -347,6 +383,27 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
                 })
                 .transpose()
                 .map_err(|err| err.name("vref_auto_tms"))?,
+
+            // AS5438 - Table F.5 to E.5
+            var_set_ena: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_var
+                .is_some()
+                .convert(),
+            var_set_pct: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_var
+                .as_ref()
+                .map(|var| ScaledValue::new(var.value.convert(), SEP2_HUNDREDTHS_SF)),
+            var_set_mod: attrs
+                .inner
+                .der_control_base
+                .op_mod_fixed_var
+                .map(|var| var.ref_type.try_convert())
+                .transpose()
+                .map_err(|err| err.name("var_set_mod"))?,
 
             // AS5438 - Table F.6 to E.6
             der_volt_watt: der_volt_watt_curve
@@ -815,6 +872,12 @@ impl Convert<u32> for Uint16 {
     }
 }
 
+impl Convert<u16> for Uint16 {
+    fn convert(self: Uint16) -> u16 {
+        self.0
+    }
+}
+
 impl Convert<u32> for Uint32 {
     fn convert(self: Uint32) -> u32 {
         self.0
@@ -848,6 +911,66 @@ impl Convert<Option<model704::WSetEna>> for bool {
             false => Some(model704::WSetEna::Disabled),
             true => Some(model704::WSetEna::Enabled),
         }
+    }
+}
+
+impl Convert<Option<model704::VarSetEna>> for bool {
+    fn convert(self: bool) -> Option<model704::VarSetEna> {
+        match self {
+            false => Some(model704::VarSetEna::Disabled),
+            true => Some(model704::VarSetEna::Enabled),
+        }
+    }
+}
+
+impl Convert<Option<model704::PfwInjEna>> for bool {
+    fn convert(self: bool) -> Option<model704::PfwInjEna> {
+        match self {
+            false => Some(model704::PfwInjEna::Disabled),
+            true => Some(model704::PfwInjEna::Enabled),
+        }
+    }
+}
+
+impl Convert<Option<model704::PfwAbsEna>> for bool {
+    fn convert(self: bool) -> Option<model704::PfwAbsEna> {
+        match self {
+            false => Some(model704::PfwAbsEna::Disabled),
+            true => Some(model704::PfwAbsEna::Enabled),
+        }
+    }
+}
+
+impl Convert<model704::PfwInjExt> for bool {
+    fn convert(self: bool) -> model704::PfwInjExt {
+        match self {
+            false => model704::PfwInjExt::OverExcited,
+            true => model704::PfwInjExt::UnderExcited,
+        }
+    }
+}
+
+impl Convert<model704::PfwAbsExt> for bool {
+    fn convert(self: bool) -> model704::PfwAbsExt {
+        match self {
+            false => model704::PfwAbsExt::OverExcited,
+            true => model704::PfwAbsExt::UnderExcited,
+        }
+    }
+}
+
+impl TryConvert<model704::VarSetMod> for DERUnitRefType {
+    fn try_convert(self: DERUnitRefType) -> ResultUnnamed<model704::VarSetMod> {
+        Ok(match self {
+            DERUnitRefType::SetMaxW => model704::VarSetMod::WMaxPct,
+            DERUnitRefType::SetMaxVar => model704::VarSetMod::VarMaxPct,
+            DERUnitRefType::StatVarAvail => model704::VarSetMod::VarAvailPct,
+            DERUnitRefType::StatWAvail
+            | DERUnitRefType::SetEffectiveV
+            | DERUnitRefType::SetMaxChargeRateW
+            | DERUnitRefType::SetMaxDischargeRateW
+            | DERUnitRefType::NotApplicable => Err(Error::UnmappableInvalid)?,
+        })
     }
 }
 

@@ -54,6 +54,14 @@ pub enum Command {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Parameters {
+    // AS5438 - Table E.3, Section E.4.1
+    pub pfw_inj_ena: Option<model704::PfwInjEna>,
+    pub pfw_inj_pf: Option<ScaledValue<u16>>,
+    pub pfw_inj_ext: Option<model704::PfwInjExt>,
+    pub pfw_abs_ena: Option<model704::PfwAbsEna>,
+    pub pfw_abs_pf: Option<ScaledValue<u16>>,
+    pub pfw_abs_ext: Option<model704::PfwAbsExt>,
+
     // AS5438 - Table E.4, Section E.4.2
     pub vref: Option<ScaledValue<u16>>,
     pub vref_auto_ena: Option<model705::CrvVRefAutoEna>,
@@ -66,6 +74,11 @@ pub struct Parameters {
     pub der_volt_watt: Option<Curve<u16, i16>>,
     pub der_volt_watt_tms: Option<ScaledValue<u32>>,
     pub der_volt_watt_dept_ref: Option<model706::CrvDeptRef>,
+
+    // AS5438 - Table E.5, Section E.4.3
+    pub var_set_ena: Option<model704::VarSetEna>,
+    pub var_set_mod: Option<model704::VarSetMod>,
+    pub var_set_pct: Option<ScaledValue<i16>>,
 
     // AS5438 - Table E.7, Section E.4.5
     pub der_trip_lv_must: Option<Curve<u16, u32>>,
@@ -101,7 +114,6 @@ pub struct Parameters {
     pub w_set_ena: Option<model704::WSetEna>,
     pub w_set_mod: Option<model704::WSetMod>,
     pub w_set: Option<ScaledValue<i32>>,
-    // TODO: Add the remaining parameters required by AS5438
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -667,6 +679,79 @@ async fn send_model704_parameters(
     if !device.models.supported_model_ids().contains(&704) {
         return Ok(());
     }
+
+    // AS5438 - Table E.3, Section E.4.1
+    write_if_some(device, Model704::PFW_INJ_ENA, parameters.pfw_inj_ena).await?;
+    write_if_some(device, Model704::PFW_ABS_ENA, parameters.pfw_abs_ena).await?;
+
+    // These points are in non-repeating groups near the end of the model. It
+    // makes them annoying to write to as we must calculate the offsets
+    // manually.
+    let pfw_inj_offset = Model704::addr(&device.models).addr + Model704::LEN;
+    let pfw_abs_offset = pfw_inj_offset + model704::PfwInj::LEN + model704::PfwInjRvrt::LEN;
+    if let Some(pfw_inj_ext) = parameters.pfw_inj_ext {
+        write_offset_point(
+            device,
+            pfw_inj_offset,
+            model704::PfwInj::EXT,
+            Some(pfw_inj_ext),
+        )
+        .await?;
+    }
+    if let Some(pfw_abs_ext) = parameters.pfw_abs_ext {
+        write_offset_point(
+            device,
+            pfw_abs_offset,
+            model704::PfwAbs::EXT,
+            Some(pfw_abs_ext),
+        )
+        .await?;
+    }
+    // Both pfw_inj_pf and pfw_abs_pf share pf_sf so group these and read that
+    // SF only once.
+    if parameters.pfw_inj_pf.is_some() || parameters.pfw_abs_pf.is_some() {
+        let pf_sf = device
+            .read_point(Model704::PF_SF)
+            .await
+            .map_err(comm_err)?
+            .unwrap_or_default();
+        if let Some(pfw_inj_pf) = parameters.pfw_inj_pf {
+            write_offset_point(
+                device,
+                pfw_inj_offset,
+                model704::PfwInj::PF,
+                Some(pfw_inj_pf.rescale(pf_sf).value),
+            )
+            .await?;
+        }
+        if let Some(pfw_abs_pf) = parameters.pfw_abs_pf {
+            write_offset_point(
+                device,
+                pfw_abs_offset,
+                model704::PfwAbs::PF,
+                Some(pfw_abs_pf.rescale(pf_sf).value),
+            )
+            .await?;
+        }
+    }
+
+    // AS5438 - Table E.5, Section E.4.3
+    write_if_some(device, Model704::VAR_SET_ENA, parameters.var_set_ena).await?;
+    if parameters.var_set_pct.is_some() {
+        let pct_sf = device
+            .read_point(Model704::VAR_SET_PCT_SF)
+            .await
+            .map_err(comm_err)?
+            .unwrap_or_default();
+        write_rescaled_if_some(
+            device,
+            Model704::VAR_SET_PCT,
+            parameters.var_set_pct,
+            pct_sf,
+        )
+        .await?;
+    }
+    write_if_some(device, Model704::VAR_SET_MOD, parameters.var_set_mod).await?;
 
     // AS5438 - Table E.11, Section E.4.9
     write_if_some(

@@ -15,7 +15,8 @@ use sep2_common::{
     packages::{
         der::{
             CurveData, DERControl, DERControlBase, DERControlList, DERCurve, DERCurveList,
-            DERProgram, DERProgramList, DERUnitRefType, DefaultDERControl, FreqDroopType,
+            DERProgram, DERProgramList, DERUnitRefType, DefaultDERControl, FixedVar, FreqDroopType,
+            PowerFactorWithExcitation,
         },
         fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
         identification::{Link, ListLink},
@@ -79,6 +80,16 @@ const HREF_VOLT_VAR_CURVE: &str = "/dc/8";
 // Values for all tables
 const EXPECTED_ADPT_CRV_REQ: u16 = 2;
 
+// Table 3.
+const OP_MOD_FIXED_PF_INJECT_W: u16 = 400;
+const OP_MOD_FIXED_PF_INJECT_W_EXT: bool = true;
+const OP_MOD_FIXED_PF_ABSORB_W: u16 = 410;
+const OP_MOD_FIXED_PF_ABSORB_W_EXT: bool = true;
+const EXPECTED_PFW_INJ_PF: u16 = 4000;
+const EXPECTED_PFW_INJ_EXT: model704::PfwInjExt = model704::PfwInjExt::UnderExcited;
+const EXPECTED_PFW_ABS_PF: u16 = 4100;
+const EXPECTED_PFW_ABS_EXT: model704::PfwAbsExt = model704::PfwAbsExt::UnderExcited;
+
 // Table 4.
 const OP_MOD_VOLT_VAR_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
 const OP_MOD_VOLT_VAR_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
@@ -92,6 +103,12 @@ const EXPECTED_DER_VOLT_VAR_TMS: u32 = 31;
 const EXPECTED_DER_VOLT_VAR_Y_REF: model705::CrvDeptRef = model705::CrvDeptRef::VarMaxPct;
 const EXPECTED_DER_VOLT_VAR_V_REF: u16 = 3;
 const EXPECTED_DER_VOLT_VAR_V_REF_AUTO_TMS: u16 = 33;
+
+// Table 5.
+const OP_MOD_FIXED_VAR: i16 = 42;
+const OP_MOD_FIXED_VAR_MOD: DERUnitRefType = DERUnitRefType::SetMaxVar;
+const EXPECTED_VAR_SET_PCT: i16 = 4;
+const EXPECTED_VAR_SET_MOD: model704::VarSetMod = model704::VarSetMod::VarMaxPct;
 
 // Table 6.
 const OP_MOD_VOLT_WATT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
@@ -371,6 +388,22 @@ async fn applies_as5438_table_6() {
     .await;
 }
 
+/// Tests that an active DERControl's constant reactive power mode values reach model 704.
+/// (AS5438 - Table 5)
+#[tokio::test]
+async fn applies_as5438_table_5() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    assert_register(
+        &mock,
+        "model704::VAR_SET_ENA",
+        Some(model704::VarSetEna::Enabled),
+    )
+    .await;
+    assert_register(&mock, "model704::VAR_SET_PCT", Some(EXPECTED_VAR_SET_PCT)).await;
+    assert_register(&mock, "model704::VAR_SET_MOD", Some(EXPECTED_VAR_SET_MOD)).await;
+}
+
 /// Tests that an active DERControl's opModVoltVar reaches model 705.
 /// (AS5438 - Table 4)
 #[tokio::test]
@@ -410,6 +443,33 @@ async fn applies_as5438_table_4() {
         model705::Crv::LEN,
     )
     .await;
+}
+
+/// Tests that an active DERControl's constant power factor mode values reach model 704.
+/// (AS5438 - Table 3)
+#[tokio::test]
+async fn applies_as5438_table_3() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    // Inject power factors
+    assert_register(
+        &mock,
+        "model704::PFW_INJ_ENA",
+        Some(model704::PfwInjEna::Enabled),
+    )
+    .await;
+    assert_register(&mock, "model704::PFW_INJ_PF", Some(EXPECTED_PFW_INJ_PF)).await;
+    assert_register(&mock, "model704::PFW_INJ_EXT", Some(EXPECTED_PFW_INJ_EXT)).await;
+
+    // Absorb power factors
+    assert_register(
+        &mock,
+        "model704::PFW_ABS_ENA",
+        Some(model704::PfwAbsEna::Enabled),
+    )
+    .await;
+    assert_register(&mock, "model704::PFW_ABS_PF", Some(EXPECTED_PFW_ABS_PF)).await;
+    assert_register(&mock, "model704::PFW_ABS_EXT", Some(EXPECTED_PFW_ABS_EXT)).await;
 }
 
 /////
@@ -777,6 +837,20 @@ async fn setup_control_mocks(mock: &MockServer) {
             }),
             op_mod_volt_var: Some(Link {
                 href: HREF_VOLT_VAR_CURVE.into(),
+            }),
+            op_mod_fixed_pf_inject_w: Some(PowerFactorWithExcitation {
+                displacement: Uint16(OP_MOD_FIXED_PF_INJECT_W),
+                excitation: OP_MOD_FIXED_PF_INJECT_W_EXT,
+                multiplier: PowerOfTenMultiplierType::None,
+            }),
+            op_mod_fixed_pf_absorb_w: Some(PowerFactorWithExcitation {
+                displacement: Uint16(OP_MOD_FIXED_PF_ABSORB_W),
+                excitation: OP_MOD_FIXED_PF_ABSORB_W_EXT,
+                multiplier: PowerOfTenMultiplierType::None,
+            }),
+            op_mod_fixed_var: Some(FixedVar {
+                value: SignedPercent::new(OP_MOD_FIXED_VAR).expect("Invalid percent"),
+                ref_type: OP_MOD_FIXED_VAR_MOD,
             }),
             ..Default::default()
         },

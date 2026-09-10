@@ -504,6 +504,60 @@ pub fn add_model_704(
 
     let offset = base_offset + 2;
 
+    // AS5438 - Table 3
+    Model704::PF_SF.fill_registers(registers, offset, Some(-1));
+    locations.insert("model704::PF_SF".into(), location(Model704::PF_SF, offset));
+    locations.insert(
+        "model704::PFW_INJ_ENA".into(),
+        location(Model704::PFW_INJ_ENA, offset),
+    );
+    locations.insert(
+        "model704::PFW_ABS_ENA".into(),
+        location(Model704::PFW_ABS_ENA, offset),
+    );
+
+    let pfw_inj_offset = offset + usize::from(Model704::LEN);
+    locations.insert(
+        "model704::PFW_INJ_PF".into(),
+        location(model704::PfwInj::PF, pfw_inj_offset),
+    );
+    locations.insert(
+        "model704::PFW_INJ_EXT".into(),
+        location(model704::PfwInj::EXT, pfw_inj_offset),
+    );
+    let pfw_abs_offset =
+        pfw_inj_offset + usize::from(model704::PfwInj::LEN + model704::PfwInjRvrt::LEN);
+    locations.insert(
+        "model704::PFW_ABS_PF".into(),
+        location(model704::PfwAbs::PF, pfw_abs_offset),
+    );
+    locations.insert(
+        "model704::PFW_ABS_EXT".into(),
+        location(model704::PfwAbs::EXT, pfw_abs_offset),
+    );
+
+    // AS5438 - Table 5
+    Model704::VAR_SET_ENA.fill_registers(registers, offset, Some(model704::VarSetEna::Disabled));
+    locations.insert(
+        "model704::VAR_SET_ENA".into(),
+        location(Model704::VAR_SET_ENA, offset),
+    );
+    Model704::VAR_SET_MOD.fill_registers(registers, offset, None);
+    locations.insert(
+        "model704::VAR_SET_MOD".into(),
+        location(Model704::VAR_SET_MOD, offset),
+    );
+    Model704::VAR_SET_PCT.fill_registers(registers, offset, Some(0));
+    locations.insert(
+        "model704::VAR_SET_PCT".into(),
+        location(Model704::VAR_SET_PCT, offset),
+    );
+    Model704::VAR_SET_PCT_SF.fill_registers(registers, offset, Some(-1));
+    locations.insert(
+        "model704::VAR_SET_PCT_SF".into(),
+        location(Model704::VAR_SET_PCT_SF, offset),
+    );
+
     // AS5438 - Table 11
     Model704::W_MAX_LIM_PCT_ENA.fill_registers(
         registers,
