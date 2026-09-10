@@ -29,7 +29,7 @@ use sep2_common::{
 };
 use sunspec::{
     Group, Value,
-    models::{model703, model704, model709, model710, model711},
+    models::{model703, model704, model707, model708, model709, model710, model711},
 };
 use tokio::{
     sync::mpsc,
@@ -60,6 +60,10 @@ const HREF_DERC_1: &str = "/edev/1/derp/1/derc/1";
 const HREF_CURVEL: &str = "/edev/1/derp/1/dc";
 const HREF_LFRT_MUST_TRIP_CURVE: &str = "/dc/1";
 const HREF_HFRT_MUST_TRIP_CURVE: &str = "/dc/2";
+const HREF_LVRT_MUST_TRIP_CURVE: &str = "/dc/3";
+const HREF_LVRT_MOM_CESS_CURVE: &str = "/dc/4";
+const HREF_HVRT_MUST_TRIP_CURVE: &str = "/dc/5";
+const HREF_HVRT_MOM_CESS_CURVE: &str = "/dc/6";
 
 // The values to be mocked and verified. Table numbers from AS5438.
 //
@@ -70,6 +74,22 @@ const HREF_HFRT_MUST_TRIP_CURVE: &str = "/dc/2";
 
 // Values for all tables
 const EXPECTED_ADPT_CRV_REQ: u16 = 2;
+
+// Table 7. Note that SEP2 and Sunspec choose the opposite ordering for the x/y
+// axes in these cases.
+const OP_MOD_LVRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_LVRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_LVRT_MUST_DATA: &[(i32, i32)] = &[(7, 8), (9, 10)];
+const EXPECTED_DER_TRIP_LV_MUST_DATA: &[(u16, u32)] = &[(800, 70), (1000, 90)];
+const OP_MOD_LVRT_MOM_CESS_DATA: &[(i32, i32)] = &[(11, 12), (13, 14)];
+const EXPECTED_DER_TRIP_LV_MOM_CESS_DATA: &[(u16, u32)] = &[(1200, 110), (1400, 130)];
+
+const OP_MOD_HVRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_HVRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
+const OP_MOD_HVRT_MUST_DATA: &[(i32, i32)] = &[(15, 16), (17, 18)];
+const EXPECTED_DER_TRIP_HV_MUST_DATA: &[(u16, u32)] = &[(1600, 150), (1800, 170)];
+const OP_MOD_HVRT_MOM_CESS_DATA: &[(i32, i32)] = &[(19, 20), (21, 22)];
+const EXPECTED_DER_TRIP_HV_MOM_CESS_DATA: &[(u16, u32)] = &[(2000, 190), (2200, 210)];
 
 // Table 8. Note that SEP2 and Sunspec choose the opposite ordering for the x/y
 // axes in these cases.
@@ -240,6 +260,56 @@ async fn applies_as5438_table_8() {
         "model710::CRV_2_ACT_PT",
         EXPECTED_DER_TRIP_HF_DATA,
         model710::MustTrip::LEN,
+    )
+    .await;
+}
+
+/// Tests that an active DERControl's opModLVRTMustTrip, opModLVRTMomCess,
+/// opModHVRTMustTrip and opModHVRTMomCess reach models 707 and 708.
+/// (AS5438 - Table 7)
+#[tokio::test]
+async fn applies_as5438_table_7() {
+    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+
+    // LVRT
+    // The requested curve should have been updated.
+    assert_register(&mock, "model707::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    assert_register(&mock, "model707::ENA", model707::Ena::Enabled).await;
+    // And the MustTrip curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model707::CRV_2_MUST_TRIP",
+        EXPECTED_DER_TRIP_LV_MUST_DATA,
+        model707::MustTrip::LEN,
+    )
+    .await;
+    // And the MomCess curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model707::CRV_2_MOM_CESS",
+        EXPECTED_DER_TRIP_LV_MOM_CESS_DATA,
+        model707::MomCess::LEN,
+    )
+    .await;
+
+    // HVRT
+    // The requested curve should have been updated.
+    assert_register(&mock, "model708::ADPT_CRV_REQ", EXPECTED_ADPT_CRV_REQ).await;
+    assert_register(&mock, "model708::ENA", model708::Ena::Enabled).await;
+    // And the MustTrip curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model708::CRV_2_MUST_TRIP",
+        EXPECTED_DER_TRIP_HV_MUST_DATA,
+        model708::MustTrip::LEN,
+    )
+    .await;
+    // And the MomCess curve data filled in.
+    assert_curve_data(
+        &mock,
+        "model708::CRV_2_MOM_CESS",
+        EXPECTED_DER_TRIP_HV_MOM_CESS_DATA,
+        model708::MomCess::LEN,
     )
     .await;
 }
@@ -592,6 +662,18 @@ async fn setup_control_mocks(mock: &MockServer) {
             op_mod_hfrt_must_trip: Some(Link {
                 href: HREF_HFRT_MUST_TRIP_CURVE.into(),
             }),
+            op_mod_lvrt_must_trip: Some(Link {
+                href: HREF_LVRT_MUST_TRIP_CURVE.into(),
+            }),
+            op_mod_lvrt_momentary_cessation: Some(Link {
+                href: HREF_LVRT_MOM_CESS_CURVE.into(),
+            }),
+            op_mod_hvrt_must_trip: Some(Link {
+                href: HREF_HVRT_MUST_TRIP_CURVE.into(),
+            }),
+            op_mod_hvrt_momentary_cessation: Some(Link {
+                href: HREF_HVRT_MOM_CESS_CURVE.into(),
+            }),
             ..Default::default()
         },
 
@@ -649,15 +731,90 @@ async fn setup_control_mocks(mock: &MockServer) {
         y_multiplier: OP_MOD_HFRT_SF_Y,
         ..Default::default()
     };
+
+    let lvrt_must_trip_curve = DERCurve {
+        href: Some(HREF_LVRT_MUST_TRIP_CURVE.into()),
+        mrid: MRIDType(1003),
+
+        curve_data: OP_MOD_LVRT_MUST_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_LVRT_SF_X,
+        y_multiplier: OP_MOD_LVRT_SF_Y,
+        ..Default::default()
+    };
+
+    let lvrt_mom_cess_curve = DERCurve {
+        href: Some(HREF_LVRT_MOM_CESS_CURVE.into()),
+        mrid: MRIDType(1004),
+
+        curve_data: OP_MOD_LVRT_MOM_CESS_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_LVRT_SF_X,
+        y_multiplier: OP_MOD_LVRT_SF_Y,
+        ..Default::default()
+    };
+
+    let hvrt_must_trip_curve = DERCurve {
+        href: Some(HREF_HVRT_MUST_TRIP_CURVE.into()),
+        mrid: MRIDType(1005),
+
+        curve_data: OP_MOD_HVRT_MUST_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_HVRT_SF_X,
+        y_multiplier: OP_MOD_HVRT_SF_Y,
+        ..Default::default()
+    };
+
+    let hvrt_mom_cess_curve = DERCurve {
+        href: Some(HREF_HVRT_MOM_CESS_CURVE.into()),
+        mrid: MRIDType(1006),
+
+        curve_data: OP_MOD_HVRT_MOM_CESS_DATA
+            .iter()
+            .map(|(x, y)| CurveData {
+                xvalue: Int32(*x),
+                yvalue: Int32(*y),
+                ..Default::default()
+            })
+            .collect(),
+        x_multiplier: OP_MOD_HVRT_SF_X,
+        y_multiplier: OP_MOD_HVRT_SF_Y,
+        ..Default::default()
+    };
     mock_resource(
         mock,
         HREF_CURVEL,
         &DERCurveList {
             href: Some(HREF_CURVEL.into()),
-            der_curve: vec![lfrt_must_trip_curve, hfrt_must_trip_curve],
+            der_curve: vec![
+                lfrt_must_trip_curve,
+                hfrt_must_trip_curve,
+                lvrt_must_trip_curve,
+                lvrt_mom_cess_curve,
+                hvrt_must_trip_curve,
+                hvrt_mom_cess_curve,
+            ],
 
-            all: Uint32(2),
-            results: Uint32(2),
+            all: Uint32(6),
+            results: Uint32(6),
         },
     )
     .await;

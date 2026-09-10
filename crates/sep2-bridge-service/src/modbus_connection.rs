@@ -10,6 +10,8 @@ use sunspec::{
         model702::{CtrlModes, Model702},
         model703::{self, Model703},
         model704::{self, Model704},
+        model707::{self, Model707},
+        model708::{self, Model708},
         model709::{self, Model709},
         model710::{self, Model710},
         model711::{self, Model711},
@@ -50,6 +52,12 @@ pub enum Command {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Parameters {
+    // AS5438 - Table E.7, Section E.4.5
+    pub der_trip_lv_must: Option<Curve<u16, u32>>,
+    pub der_trip_lv_mom_cess: Option<Curve<u16, u32>>,
+    pub der_trip_hv_must: Option<Curve<u16, u32>>,
+    pub der_trip_hv_mom_cess: Option<Curve<u16, u32>>,
+
     // AS5438 - Table E.8, Section E.4.6
     pub der_trip_lf: Option<Curve<u32, u32>>,
     pub der_trip_hf: Option<Curve<u32, u32>>,
@@ -544,6 +552,8 @@ async fn send_new_parameters(
 ) -> Result<()> {
     send_model703_parameters(device, parameters).await?;
     send_model704_parameters(device, parameters).await?;
+    send_model707_parameters(device, parameters).await?;
+    send_model708_parameters(device, parameters).await?;
     send_model709_parameters(device, parameters).await?;
     send_model710_parameters(device, parameters).await?;
     send_model711_parameters(device, parameters).await?;
@@ -684,6 +694,68 @@ async fn send_model704_parameters(
         write_rescaled_if_some(device, Model704::W_SET, parameters.w_set, w_set_sf).await?;
     }
     write_if_some(device, Model704::W_SET_MOD, parameters.w_set_mod).await?;
+
+    Ok(())
+}
+
+async fn send_model707_parameters(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+) -> Result<()> {
+    // AS5438 - Table E.7, Section E.4.5
+    if !device.models.supported_model_ids().contains(&707) {
+        return Ok(());
+    }
+
+    let wrote_curve = Model707::write_curves(
+        device,
+        parameters.der_trip_lv_must.as_ref(),
+        None,
+        parameters.der_trip_lv_mom_cess.as_ref(),
+    )
+    .await?;
+    device
+        .write_point(
+            Model707::ENA,
+            if wrote_curve {
+                model707::Ena::Enabled
+            } else {
+                model707::Ena::Disabled
+            },
+        )
+        .await
+        .map_err(comm_err)?;
+
+    Ok(())
+}
+
+async fn send_model708_parameters(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+) -> Result<()> {
+    // AS5438 - Table E.7, Section E.4.5
+    if !device.models.supported_model_ids().contains(&708) {
+        return Ok(());
+    }
+
+    let wrote_curve = Model708::write_curves(
+        device,
+        parameters.der_trip_hv_must.as_ref(),
+        None,
+        parameters.der_trip_hv_mom_cess.as_ref(),
+    )
+    .await?;
+    device
+        .write_point(
+            Model708::ENA,
+            if wrote_curve {
+                model708::Ena::Enabled
+            } else {
+                model708::Ena::Disabled
+            },
+        )
+        .await
+        .map_err(comm_err)?;
 
     Ok(())
 }
@@ -1020,6 +1092,40 @@ enum TripCurve {
     MustTrip,
     MayTrip,
     MomCess,
+}
+
+impl TripCurveModel<u16, u32> for Model707 {
+    type GCrv = model707::Crv;
+    type GMustTrip = model707::MustTrip;
+    type GMayTrip = model707::MayTrip;
+    type GMomCess = model707::MomCess;
+    type GPt = model707::Pt;
+
+    const ADPT_CRV_REQ: Point<Self, u16> = Self::ADPT_CRV_REQ;
+    const N_CRV_SET: Point<Self, u16> = Self::N_CRV_SET;
+    const N_PT: Point<Self, u16> = Self::N_PT;
+    const X_SF: Point<Self, i16> = Self::V_SF;
+    const Y_SF: Point<Self, i16> = Self::TMS_SF;
+    const CRV_ACT_PT: Point<Self::GMustTrip, Option<u16>> = model707::MustTrip::ACT_PT;
+    const X_PT: Point<Self::GPt, Option<u16>> = model707::Pt::V;
+    const Y_PT: Point<Self::GPt, Option<u32>> = model707::Pt::TMS;
+}
+
+impl TripCurveModel<u16, u32> for Model708 {
+    type GCrv = model708::Crv;
+    type GMustTrip = model708::MustTrip;
+    type GMayTrip = model708::MayTrip;
+    type GMomCess = model708::MomCess;
+    type GPt = model708::Pt;
+
+    const ADPT_CRV_REQ: Point<Self, u16> = Self::ADPT_CRV_REQ;
+    const N_CRV_SET: Point<Self, u16> = Self::N_CRV_SET;
+    const N_PT: Point<Self, u16> = Self::N_PT;
+    const X_SF: Point<Self, i16> = Self::V_SF;
+    const Y_SF: Point<Self, i16> = Self::TMS_SF;
+    const CRV_ACT_PT: Point<Self::GMustTrip, Option<u16>> = model708::MustTrip::ACT_PT;
+    const X_PT: Point<Self::GPt, Option<u16>> = model708::Pt::V;
+    const Y_PT: Point<Self::GPt, Option<u32>> = model708::Pt::TMS;
 }
 
 impl TripCurveModel<u32, u32> for Model709 {

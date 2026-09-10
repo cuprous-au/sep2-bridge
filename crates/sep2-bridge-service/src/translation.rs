@@ -301,6 +301,40 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
         let get_curve_data = |link: DERCurveLink| attrs.curves.get(&link.href).cloned();
 
         Ok(ModbusParameters {
+            // AS5438 - Table F.7 to E.7
+            der_trip_lv_must: attrs
+                .inner
+                .der_control_base
+                .op_mod_lvrt_must_trip
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_lv_must"))?,
+            der_trip_lv_mom_cess: attrs
+                .inner
+                .der_control_base
+                .op_mod_lvrt_momentary_cessation
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_lv_mom_cess"))?,
+            der_trip_hv_must: attrs
+                .inner
+                .der_control_base
+                .op_mod_hvrt_must_trip
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_hv_must"))?,
+            der_trip_hv_mom_cess: attrs
+                .inner
+                .der_control_base
+                .op_mod_hvrt_momentary_cessation
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_hv_mom_cess"))?,
+
             // AS5438 - Table F.8 to E.8
             der_trip_lf: attrs
                 .inner
