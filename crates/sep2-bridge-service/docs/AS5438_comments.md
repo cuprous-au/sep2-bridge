@@ -85,11 +85,17 @@ In addition `711.Ena` is required to be set to enabled/disabled depending on
 whether a frequency droop is provided, and `711.AdptCtlReq` is assigned 2 after
 the `Ctl` group data has been updated.
 
-## Table E.12 (Section E.4.10)
+## Tables E.5 and E.12 (Sections E.4.3 and E.4.10)
 
-The SunSpec parameter `WSetMod` is not mentioned in the table. This parameter
-is intended to switch between percentage (`W_MAX_PCT`) and Watts (`WATTS`). We
-choose to set `WSetMod=W_MAX_PCT` when `WSetPct` is provided.
+The SunSpec parameters `VarSetMod` and `WSetMod` are not mentioned in the
+tables. These parameters are intended to switch between various modes
+(percentage or absolute) and different reference frames when percentages are
+defined. For `VarSetMod` we attempt to set the value based on `opModFixedVar`'s
+`ref_type`. For `WSetMod` we choose to set `WSetMod=W_MAX_PCT` when `WSetPct` is
+provided.
+
+We also note that it is unclear how `opModTargetVar` should be translated to the
+`VarSetPct` setting, so we only act on changes to `opModFixedVar`.
 
 ## Tables F.3-10
 
