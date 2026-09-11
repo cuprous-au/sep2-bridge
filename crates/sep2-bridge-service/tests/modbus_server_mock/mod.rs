@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use sunspec::models::model1::Model1;
-use sunspec::models::model103::Model103;
 use sunspec::models::model701::{self, Model701};
 use sunspec::models::model702::Model702;
 use sunspec::models::model703::{self, Model703};
@@ -282,9 +281,6 @@ fn initialise_registers(registers: &mut [u16], enabled_models: Option<&[u32]>) -
         if enabled_models.is_none_or(|v| v.contains(&1)) {
             offset = add_model_1(registers, offset, &mut locations);
         }
-        if enabled_models.is_none_or(|v| v.contains(&103)) {
-            offset = add_model_103(registers, offset, &mut locations);
-        }
         if enabled_models.is_none_or(|v| v.contains(&701)) {
             offset = add_model_701(registers, offset, &mut locations);
         }
@@ -342,22 +338,6 @@ pub fn add_model_1(registers: &mut [u16], base_offset: usize, locations: &mut Lo
     locations.insert("model1::MN".into(), location(Model1::MN, offset));
 
     offset + usize::from(Model1::LEN)
-}
-
-pub fn add_model_103(
-    registers: &mut [u16],
-    base_offset: usize,
-    _locations: &mut Locations,
-) -> usize {
-    registers[base_offset] = Model103::ID;
-    registers[base_offset + 1] = Model103::LEN;
-
-    let offset = base_offset + 2;
-    Model103::W.fill_registers(registers, offset, 15000);
-    Model103::W_SF.fill_registers(registers, offset, -1);
-    Model103::ST.fill_registers(registers, offset, sunspec::models::model103::St::Mppt);
-
-    offset + usize::from(Model103::LEN)
 }
 
 /// Appends Model 701 (DER AC Measurement - IEEE 1547 / DER)
