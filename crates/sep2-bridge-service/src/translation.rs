@@ -145,6 +145,7 @@ impl TryFrom<ModbusStatus> for DERStatus {
                 .try_convert()
                 .map_err(|err| err.name("alarm_status"))?,
             state_of_charge_status: status.soc.convert(),
+            reading_time: Int64(Utc::now().timestamp()),
             ..Default::default()
         })
     }
@@ -159,6 +160,7 @@ impl TryFrom<ModbusSettings> for DERSettings {
                 .esv_hi
                 .try_convert()
                 .map_err(|err| err.name("set_es_high_volt"))?,
+            updated_time: Int64(Utc::now().timestamp()),
             ..Default::default()
         })
     }
