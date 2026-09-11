@@ -5,9 +5,9 @@ use derive_more::Display;
 use sep2_common::packages::{
     der::{
         ActivePower, ApparentPower, ConnectStatusType, ConnectStatusValue, DERAlarmStatus,
-        DERCapability, DERControlType, DERCurve, DERSettings, DERStatus, FreqDroopType,
-        OperationalModeStatusType, OperationalModeStatusValue, PowerFactor, ReactivePower,
-        ReactiveSusceptance, StateOfChargeStatusType, VoltageRMS,
+        DERCapability, DERControlType, DERCurve, DERSettings, DERStatus, DERUnitRefType,
+        FreqDroopType, OperationalModeStatusType, OperationalModeStatusValue, PowerFactor,
+        ReactivePower, ReactiveSusceptance, StateOfChargeStatusType, VoltageRMS,
     },
     links::DERCurveLink,
     metering::{Reading, ReadingType},
@@ -19,7 +19,7 @@ use sep2_common::packages::{
     },
 };
 use std::convert::TryFrom;
-use sunspec::models::{model701, model702::CtrlModes, model703, model704};
+use sunspec::models::{model701, model702::CtrlModes, model703, model704, model705, model706};
 
 use crate::{
     ScaledValue,
@@ -300,7 +300,70 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
     fn try_from(attrs: ControlAttributes) -> Result<ModbusParameters> {
         let get_curve_data = |link: DERCurveLink| attrs.curves.get(&link.href).cloned();
 
+        let der_volt_var_curve = attrs
+            .inner
+            .der_control_base
+            .op_mod_volt_var
+            .clone()
+            .and_then(get_curve_data);
+        let der_volt_watt_curve = attrs
+            .inner
+            .der_control_base
+            .op_mod_volt_watt
+            .and_then(get_curve_data);
+
         Ok(ModbusParameters {
+            // AS5438 - Table F.4 to E.4
+            der_volt_var: der_volt_var_curve
+                .clone()
+                .map(|c| convert_curve(c, AxisOrder::Same))
+                .transpose()
+                .map_err(|err| err.name("der_volt_var"))?,
+
+            der_volt_var_tms: der_volt_var_curve.as_ref().and_then(|c| {
+                c.open_loop_tms
+                    .convert()
+                    .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF))
+            }),
+            der_volt_var_dept_ref: der_volt_var_curve
+                .as_ref()
+                .map(|c| c.y_ref_type.try_convert())
+                .transpose()
+                .map_err(|err| err.name("der_volt_var_dept_ref"))?,
+
+            vref: der_volt_var_curve.as_ref().and_then(|c| {
+                c.v_ref
+                    .convert()
+                    .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF))
+            }),
+            vref_auto_ena: der_volt_var_curve
+                .as_ref()
+                .map(|c| c.autonomous_v_ref_enable.unwrap_or(false).convert()),
+            vref_auto_tms: der_volt_var_curve
+                .as_ref()
+                .and_then(|c| {
+                    c.autonomous_v_ref_time_constant
+                        .map(|val| Uint32(hundredths_to_seconds(val.0)).try_convert())
+                })
+                .transpose()
+                .map_err(|err| err.name("vref_auto_tms"))?,
+
+            // AS5438 - Table F.6 to E.6
+            der_volt_watt: der_volt_watt_curve
+                .clone()
+                .map(|c| convert_curve(c, AxisOrder::Same))
+                .transpose()
+                .map_err(|err| err.name("der_volt_watt"))?,
+            der_volt_watt_tms: der_volt_watt_curve
+                .as_ref()
+                .and_then(|curve_data| curve_data.open_loop_tms.convert())
+                .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
+            der_volt_watt_dept_ref: der_volt_watt_curve
+                .as_ref()
+                .map(|c| c.y_ref_type.try_convert())
+                .transpose()
+                .map_err(|err| err.name("der_volt_watt_dept_ref"))?,
+
             // AS5438 - Table F.7 to E.7
             der_trip_lv_must: attrs
                 .inner
@@ -380,17 +443,21 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
                 .set_es_low_freq
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            es_dly_tms: attrs.inner.set_es_delay.convert().map(es_time_to_seconds),
+            es_dly_tms: attrs
+                .inner
+                .set_es_delay
+                .convert()
+                .map(hundredths_to_seconds),
             es_rnd_tms: attrs
                 .inner
                 .set_es_random_delay
                 .convert()
-                .map(es_time_to_seconds),
+                .map(hundredths_to_seconds),
             es_rmp_tms: attrs
                 .inner
                 .set_es_ramp_tms
                 .convert()
-                .map(es_time_to_seconds),
+                .map(hundredths_to_seconds),
 
             // AS5438 - Table F.11 to E.11
             w_max_lim_pct_ena: attrs
@@ -438,7 +505,7 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
     }
 }
 
-fn es_time_to_seconds(hundredths_of_a_second: u32) -> u32 {
+fn hundredths_to_seconds(hundredths_of_a_second: u32) -> u32 {
     ScaledValue::new(hundredths_of_a_second, SEP2_HUNDREDTHS_SF)
         .rescale(SUNSPEC_SECONDS_SF)
         .value
@@ -736,6 +803,12 @@ impl TryConvert<i16> for Int32 {
     }
 }
 
+impl TryConvert<u16> for Uint32 {
+    fn try_convert(self: Uint32) -> ResultUnnamed<u16> {
+        u16::try_from(self.0).map_err(|_| Error::SignedOverflow)
+    }
+}
+
 impl Convert<u32> for Uint16 {
     fn convert(self: Uint16) -> u32 {
         u32::from(self.0)
@@ -787,6 +860,45 @@ impl Convert<model703::Es> for bool {
     }
 }
 
+impl Convert<model705::CrvVRefAutoEna> for bool {
+    fn convert(self: bool) -> model705::CrvVRefAutoEna {
+        match self {
+            false => model705::CrvVRefAutoEna::Disabled,
+            true => model705::CrvVRefAutoEna::Enabled,
+        }
+    }
+}
+
+impl TryConvert<model705::CrvDeptRef> for DERUnitRefType {
+    fn try_convert(self: DERUnitRefType) -> ResultUnnamed<model705::CrvDeptRef> {
+        Ok(match self {
+            DERUnitRefType::SetMaxW => model705::CrvDeptRef::WMaxPct,
+            DERUnitRefType::SetMaxVar => model705::CrvDeptRef::VarMaxPct,
+            DERUnitRefType::StatVarAvail => model705::CrvDeptRef::VarAvalPct,
+            DERUnitRefType::StatWAvail
+            | DERUnitRefType::SetEffectiveV
+            | DERUnitRefType::SetMaxChargeRateW
+            | DERUnitRefType::SetMaxDischargeRateW
+            | DERUnitRefType::NotApplicable => Err(Error::UnmappableInvalid)?,
+        })
+    }
+}
+
+impl TryConvert<model706::CrvDeptRef> for DERUnitRefType {
+    fn try_convert(self: DERUnitRefType) -> ResultUnnamed<model706::CrvDeptRef> {
+        Ok(match self {
+            DERUnitRefType::SetMaxW => model706::CrvDeptRef::WMaxPct,
+            DERUnitRefType::StatWAvail => model706::CrvDeptRef::WAvalPct,
+            DERUnitRefType::SetMaxVar
+            | DERUnitRefType::StatVarAvail
+            | DERUnitRefType::SetEffectiveV
+            | DERUnitRefType::SetMaxChargeRateW
+            | DERUnitRefType::SetMaxDischargeRateW
+            | DERUnitRefType::NotApplicable => Err(Error::UnmappableInvalid)?,
+        })
+    }
+}
+
 impl Convert<Model711Ctl> for FreqDroopType {
     fn convert(self: FreqDroopType) -> Model711Ctl {
         Model711Ctl {
@@ -835,7 +947,7 @@ impl Convert<i16> for PowerOfTenMultiplierType {
 }
 
 enum AxisOrder {
-    _Same,
+    Same,
     Flipped,
 }
 
@@ -852,7 +964,7 @@ where
     Int32: TryConvert<TY>,
 {
     match axis_order {
-        AxisOrder::_Same => Ok(ModbusCurve {
+        AxisOrder::Same => Ok(ModbusCurve {
             points: input
                 .curve_data
                 .iter()

@@ -12,6 +12,8 @@ use sunspec::models::model701::{self, Model701};
 use sunspec::models::model702::Model702;
 use sunspec::models::model703::{self, Model703};
 use sunspec::models::model704::{self, Model704};
+use sunspec::models::model705::{self, Model705};
+use sunspec::models::model706::{self, Model706};
 use sunspec::models::model707::{self, Model707};
 use sunspec::models::model708::{self, Model708};
 use sunspec::models::model709::{self, Model709};
@@ -295,6 +297,12 @@ fn initialise_registers(registers: &mut [u16], enabled_models: Option<&[u32]>) -
         if enabled_models.is_none_or(|v| v.contains(&704)) {
             offset = add_model_704(registers, offset, &mut locations);
         }
+        if enabled_models.is_none_or(|v| v.contains(&705)) {
+            offset = add_model_705(registers, offset, &mut locations);
+        }
+        if enabled_models.is_none_or(|v| v.contains(&706)) {
+            offset = add_model_706(registers, offset, &mut locations);
+        }
         if enabled_models.is_none_or(|v| v.contains(&707)) {
             offset = add_model_707(registers, offset, &mut locations);
         }
@@ -547,6 +555,144 @@ pub fn add_model_704(
         "model704::W_SET_SF".into(),
         location(Model704::W_SET_SF, offset),
     );
+
+    offset + usize::from(length)
+}
+
+/// Appends Model 705 (DER Volt-Var)
+pub fn add_model_705(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    let n_crv = 2;
+    let n_pt = 4;
+
+    let crv_len = model705::Crv::LEN + model705::Pt::LEN * n_pt;
+    let length = Model705::LEN + crv_len * n_crv;
+
+    registers[base_offset] = Model705::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+
+    Model705::ENA.fill_registers(registers, offset, model705::Ena::Disabled);
+    locations.insert("model705::ENA".into(), location(Model705::ENA, offset));
+    Model705::ADPT_CRV_REQ.fill_registers(registers, offset, 1);
+    locations.insert(
+        "model705::ADPT_CRV_REQ".into(),
+        location(Model705::ADPT_CRV_REQ, offset),
+    );
+    Model705::N_PT.fill_registers(registers, offset, n_pt);
+    locations.insert("model705::N_PT".into(), location(Model705::N_PT, offset));
+    Model705::N_CRV.fill_registers(registers, offset, n_crv);
+    locations.insert("model705::N_CRV".into(), location(Model705::N_CRV, offset));
+    Model705::V_SF.fill_registers(registers, offset, 1);
+    locations.insert("model705::V_SF".into(), location(Model705::V_SF, offset));
+    Model705::DEPT_REF_SF.fill_registers(registers, offset, 2);
+    locations.insert(
+        "model705::DEPT_REF_SF".into(),
+        location(Model705::DEPT_REF_SF, offset),
+    );
+
+    // Ensure the 1st curve is readonly
+    model705::Crv::READ_ONLY.fill_registers(
+        registers,
+        offset + usize::from(Model705::LEN),
+        model705::CrvReadOnly::R,
+    );
+
+    // Skip to the 2nd curve, past the READ_ONLY point.
+    let crv_offset = offset + usize::from(Model705::LEN + crv_len);
+    // Record the curve location and the Tms location
+    locations.insert(
+        "model705::CRV_2_ACT_PT".into(),
+        location(model705::Crv::ACT_PT, crv_offset),
+    );
+    locations.insert(
+        "model705::CRV_2_DEPT_REF".into(),
+        location(model705::Crv::DEPT_REF, crv_offset),
+    );
+    locations.insert(
+        "model705::CRV_2_V_REF".into(),
+        location(model705::Crv::V_REF, crv_offset),
+    );
+    locations.insert(
+        "model705::CRV_2_V_REF_AUTO_ENA".into(),
+        location(model705::Crv::V_REF_AUTO_ENA, crv_offset),
+    );
+    locations.insert(
+        "model705::CRV_2_V_REF_AUTO_TMS".into(),
+        location(model705::Crv::V_REF_AUTO_TMS, crv_offset),
+    );
+    locations.insert(
+        "model705::CRV_2_RSP_TMS".into(),
+        location(model705::Crv::RSP_TMS, crv_offset),
+    );
+    // The location of the data will have to be worked out by the user.
+
+    offset + usize::from(length)
+}
+
+/// Appends Model 706 (DER Volt-Watt)
+pub fn add_model_706(
+    registers: &mut [u16],
+    base_offset: usize,
+    locations: &mut Locations,
+) -> usize {
+    let n_crv = 2;
+    let n_pt = 4;
+
+    let crv_len = model706::Crv::LEN + model706::Pt::LEN * n_pt;
+    let length = Model706::LEN + crv_len * n_crv;
+
+    registers[base_offset] = Model706::ID;
+    registers[base_offset + 1] = length;
+
+    let offset = base_offset + 2;
+
+    Model706::ENA.fill_registers(registers, offset, model706::Ena::Disabled);
+    locations.insert("model706::ENA".into(), location(Model706::ENA, offset));
+    Model706::ADPT_CRV_REQ.fill_registers(registers, offset, 1);
+    locations.insert(
+        "model706::ADPT_CRV_REQ".into(),
+        location(Model706::ADPT_CRV_REQ, offset),
+    );
+    Model706::N_PT.fill_registers(registers, offset, n_pt);
+    locations.insert("model706::N_PT".into(), location(Model706::N_PT, offset));
+    Model706::N_CRV.fill_registers(registers, offset, n_crv);
+    locations.insert("model706::N_CRV".into(), location(Model706::N_CRV, offset));
+    Model706::V_SF.fill_registers(registers, offset, 1);
+    locations.insert("model706::V_SF".into(), location(Model706::V_SF, offset));
+    Model706::DEPT_REF_SF.fill_registers(registers, offset, 2);
+    locations.insert(
+        "model706::DEPT_REF_SF".into(),
+        location(Model706::DEPT_REF_SF, offset),
+    );
+
+    // Ensure the 1st curve is readonly
+    model706::Crv::READ_ONLY.fill_registers(
+        registers,
+        offset + usize::from(Model706::LEN),
+        model706::CrvReadOnly::R,
+    );
+
+    // Skip to the 2nd curve, past the READ_ONLY point.
+    let crv_offset = offset + usize::from(Model706::LEN + crv_len);
+    // Record the curve location and the Tms location
+    locations.insert(
+        "model706::CRV_2_ACT_PT".into(),
+        location(model706::Crv::ACT_PT, crv_offset),
+    );
+    locations.insert(
+        "model706::CRV_2_DEPT_REF".into(),
+        location(model706::Crv::DEPT_REF, crv_offset),
+    );
+    locations.insert(
+        "model706::CRV_2_RSP_TMS".into(),
+        location(model706::Crv::RSP_TMS, crv_offset),
+    );
+    // The location of the data will have to be worked out by the user.
 
     offset + usize::from(length)
 }
