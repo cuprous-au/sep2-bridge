@@ -8,9 +8,9 @@ use sep2_common::{
             DERControl, DERControlList, DERCurve, DERCurveList, DERProgram, DERProgramList,
             DefaultDERControl,
         },
-        edev::EndDevice,
+        edev::{EndDevice, EndDeviceList},
         fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
-        identification::{Link, ListLink, ResponseRequired, ResponseStatus},
+        identification::{ResponseRequired, ResponseStatus},
         objects::EventStatusType,
         primitives::{HexBinary160, Int64, Uint32},
         time::Time,
@@ -19,7 +19,8 @@ use sep2_common::{
     traits::{SEList, SEResource},
 };
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
+    hash::Hash,
     iter,
     sync::Arc,
 };
@@ -48,14 +49,32 @@ impl ScheduledControl {
 
 /// Contains the ids of all items that are in a SEList, without
 /// storing the rest of the details.
-#[derive(Debug, Clone)]
-struct MRIDList {
-    pub items: Vec<MRIDType>,
-    // These two are dead_code for now but are required for when poll rate update handling is needed.
-    #[expect(dead_code)]
-    pub poll_rate: Option<Uint32>,
-    #[expect(dead_code)]
+#[derive(Debug)]
+struct IDList<T> {
     pub href: String,
+    pub items: Vec<T>,
+    pub poll_rate: Option<Uint32>,
+}
+type MRIDList = IDList<MRIDType>;
+type LFDIList = IDList<HexBinary160>;
+
+/// A resource the model needs to be kept up to date with, and the poll rate
+/// that applies to it.
+#[derive(Debug, PartialEq, Eq)]
+struct ResourceLink {
+    kind: ResourceKind,
+    poll_rate: Option<Uint32>,
+}
+type ResourceLinks = BTreeMap<String, ResourceLink>;
+
+/// An entry for `ResourceLinks`: a resource's href, its kind and the poll rate
+/// that applies to it.
+fn resource_link(
+    href: impl Into<String>,
+    kind: ResourceKind,
+    poll_rate: Option<Uint32>,
+) -> (String, ResourceLink) {
+    (href.into(), ResourceLink { kind, poll_rate })
 }
 
 /// A reference to a DERControl (scheduled control) or a DefaultDERControl.
@@ -75,9 +94,14 @@ pub struct Sep2Model {
     program_lists: HashMap<String, MRIDList>,
     control_lists: HashMap<String, MRIDList>,
     curve_lists: HashMap<String, MRIDList>,
+    // The end device list is special as it is unique and contains LFDIs
+    // instead of MRIDs. It is stored along with its href.
+    end_device_list: Option<LFDIList>,
 
     // The individual resource definitions.
-    end_devices: HashMap<String, EndDevice>,
+    // End devices are keyed by LFDI, as an href may refer to a different
+    // device over time.
+    end_devices: HashMap<HexBinary160, EndDevice>,
     function_set_assignments: HashMap<MRIDType, FunctionSetAssignments>,
     programs: HashMap<MRIDType, DERProgram>,
     controls: HashMap<MRIDType, ScheduledControl>,
@@ -94,19 +118,21 @@ impl Sep2Model {
         // TODO: Use a single rng rather than getting the thread rng each time.
         let mut rng = rand::rng();
 
-        // Each of these updates returns a set of events that should be broadcast by the caller.
-        match update {
+        // We build the entire list of resource links before and after applying
+        // the update and diff them to identify any changes. While this is a
+        // little wasteful in calculation, it pays off in the non-local effects
+        // each resource can have on others (parent resources control their
+        // children's pollrates sometimes 3 levels deep, items can disappear
+        // from lists). For the number of resources expected in the model, this
+        // cost is expected to be small.
+        let resource_links_before = self.resource_links();
+
+        // Collect up any events that require responses to the SEP2 server.
+        let control_events = match update {
             Sep2ResourceEvent::Time(time) => self.set_time(&time),
             Sep2ResourceEvent::EndDeviceList(edl) => {
                 generic_log_list(&edl);
-
-                edl.end_device
-                    .iter()
-                    .flat_map(|edev| self.set_end_device(edev))
-                    .collect()
-
-                // TODO: Identify old items to unsubscribe from. These should get removed
-                // from the self which will emit more actions for us to act on.
+                self.set_end_device_list(&edl)
             }
             Sep2ResourceEvent::FunctionSetAssignmentsList(fsal) => {
                 generic_log_list(&fsal);
@@ -125,202 +151,126 @@ impl Sep2Model {
                 self.set_der_curve_list(&curves)
             }
             Sep2ResourceEvent::DefaultDERControl(dderc) => self.set_default_der_control(&dderc),
-        }
+        };
+
+        let resource_links_after = self.resource_links();
+
+        // TODO: Go through all of our resources and any that don't exist in the
+        // resource_links_after are orphaned and should be removed from the
+        // model. This is GH issue #20.
+
+        // Announce changes to the set of polled resources first, followed by
+        // any control responses.
+        let mut events = Self::resource_link_events(resource_links_before, resource_links_after);
+        events.extend(control_events);
+        events
+    }
+
+    /// Upsert an EndDeviceList. Will upsert EndDevices too.
+    pub fn set_end_device_list(self: &mut Sep2Model, incoming: &EndDeviceList) -> Vec<Event> {
+        // We should always have a href, but for type safety let's abort early if we don't.
+        let Some(href) = require_href(incoming) else {
+            return Vec::new();
+        };
+
+        // Create a simplified list
+        let list = LFDIList {
+            href,
+            items: incoming
+                .end_device
+                .iter()
+                // Flat map will throw away any device without an LFDI. All
+                // devices should have an LFDI in any case.
+                .flat_map(|edev| edev.lfdi)
+                .collect(),
+            poll_rate: incoming.poll_rate,
+        };
+        self.end_device_list = Some(list);
+
+        incoming
+            .end_device
+            .iter()
+            .for_each(|edev| self.set_end_device(edev));
+
+        // No responses required.
+        Vec::new()
     }
 
     /// Insert/replace information about a single EndDevice in the model.
-    pub fn set_end_device(self: &mut Sep2Model, incoming: &EndDevice) -> Vec<Event> {
-        let href = safe_href(incoming);
-
-        match self.end_devices.entry(href.clone()) {
-            Entry::Occupied(mut entry) => {
-                // Events for the FSAL link change
-                let events = link_update_events(
-                    &entry.get().function_set_assignments_list_link,
-                    &incoming.function_set_assignments_list_link,
-                    ResourceKind::FunctionSetAssignmentsList,
-                );
-                entry.insert(incoming.clone());
-
-                events
-            }
-
-            Entry::Vacant(entry) => {
-                // Event for this object
-                let events = iter::once(Event::LinkAdded {
-                    href: href.clone(),
-                    kind: ResourceKind::EndDevice,
-                })
-                // Event for the FSAL
-                .chain(link_update_events(
-                    &None,
-                    &incoming.function_set_assignments_list_link,
-                    ResourceKind::FunctionSetAssignmentsList,
-                ))
-                .collect();
-                entry.insert(incoming.clone());
-
-                events
-            }
-        }
+    pub fn set_end_device(self: &mut Sep2Model, incoming: &EndDevice) {
+        let Some(lfdi) = incoming.lfdi else {
+            log::warn!(
+                "Ignoring EndDevice ({}) without an LFDI.",
+                incoming.href.as_deref().unwrap_or("missing href")
+            );
+            return;
+        };
+        self.end_devices.insert(lfdi, incoming.clone());
     }
 
-    /// Upsert a FunctionSetAssignmentsList. Will upsert FunctionsSetAssignments too.
+    /// Upsert a FunctionSetAssignmentsList. Will upsert FunctionSetAssignments too.
     pub fn set_function_set_assignments_list(
         self: &mut Sep2Model,
         incoming: &FunctionSetAssignmentsList,
     ) -> Vec<Event> {
-        let href = safe_href(incoming);
-
-        // TODO: Determine which entries have disappeared since last poll and
-        // unsubscribe from them + delete them from the model.
+        // We should always have a href, but for type safety let's abort early if we don't.
+        let Some(href) = require_href(incoming) else {
+            return Vec::new();
+        };
 
         // Create a simplified list
         let list = MRIDList {
+            href: href.clone(),
             items: incoming
                 .function_set_assignments
                 .iter()
                 .map(|fsa| fsa.mrid)
                 .collect(),
             poll_rate: incoming.poll_rate,
-            href: href.clone(),
         };
-        self.function_set_assignments_lists
-            .insert(href.clone(), list);
+        self.function_set_assignments_lists.insert(href, list);
 
-        // Apply all individual FSAs and return their events
         incoming
             .function_set_assignments
             .iter()
-            .flat_map(|fsa| self.set_function_set_assignments(fsa))
-            .collect()
+            .for_each(|fsa| self.set_function_set_assignments(fsa));
+
+        // No responses required.
+        Vec::new()
     }
 
     /// Upsert a FunctionSetAssignments.
-    pub fn set_function_set_assignments(
-        self: &mut Sep2Model,
-        incoming: &FunctionSetAssignments,
-    ) -> Vec<Event> {
-        match self.function_set_assignments.entry(incoming.mrid) {
-            Entry::Occupied(mut entry) => {
-                // Events for the DERPL link change.
-                let events = link_update_events(
-                    &entry.get().der_program_list_link,
-                    &incoming.der_program_list_link,
-                    ResourceKind::DERProgramList,
-                );
-
-                entry.insert(incoming.clone());
-
-                events
-            }
-
-            Entry::Vacant(entry) => {
-                let events =
-                // Subscribe to this href if it's present.
-                incoming.href.iter().map(|href| Event::LinkAdded {
-                    href: href.clone(),
-                    kind: ResourceKind::FunctionSetAssignments,
-                })
-                // And the DEPProgramList link.
-                .chain(
-                    link_update_events(&None, &incoming
-                    .der_program_list_link,
-                    ResourceKind::DERProgramList
-                    )
-                ).collect();
-
-                entry.insert(incoming.clone());
-
-                events
-            }
-        }
+    pub fn set_function_set_assignments(self: &mut Sep2Model, incoming: &FunctionSetAssignments) {
+        self.function_set_assignments
+            .insert(incoming.mrid, incoming.clone());
     }
 
     /// Upsert a DERProgramList. Will upsert DERPrograms too.
     pub fn set_der_program_list(self: &mut Sep2Model, incoming: &DERProgramList) -> Vec<Event> {
-        let href = safe_href(incoming);
+        // We should always have a href, but for type safety let's abort early if we don't.
+        let Some(href) = require_href(incoming) else {
+            return Vec::new();
+        };
 
         let list = MRIDList {
+            href: href.clone(),
             items: incoming.der_program.iter().map(|derp| derp.mrid).collect(),
             poll_rate: incoming.poll_rate,
-            href: href.clone(),
         };
-        self.program_lists.insert(href.clone(), list);
+        self.program_lists.insert(href, list);
 
-        // Apply all individual DERPs and return their events
         incoming
             .der_program
             .iter()
-            .flat_map(|derp| self.set_der_program(derp))
-            .collect()
+            .for_each(|derp| self.set_der_program(derp));
+
+        // No responses required.
+        Vec::new()
     }
 
     /// Upsert a DERProgram.
-    pub fn set_der_program(self: &mut Sep2Model, incoming: &DERProgram) -> Vec<Event> {
-        match self.programs.entry(incoming.mrid) {
-            Entry::Occupied(mut entry) => {
-                let events =
-                // Check DERControlList for updates
-                link_update_events(
-                    &entry.get().der_control_list_link,
-                    &incoming.der_control_list_link,
-                    ResourceKind::DERControlList,
-                )
-                .into_iter()
-                // Check DefaultDERControl for updates
-                .chain(link_update_events(
-                    &entry.get().default_der_control_link,
-                    &incoming.default_der_control_link,
-                    ResourceKind::DefaultDERControl,
-                ))
-                // Check DERCurveList for updates
-                .chain(link_update_events(
-                    &entry.get().der_curve_list_link,
-                    &incoming.der_curve_list_link,
-                    ResourceKind::DERCurveList,
-                ))
-                .collect();
-
-                entry.insert(incoming.clone());
-
-                events
-            }
-
-            Entry::Vacant(entry) => {
-                let events =
-                // Subscribe to this object
-                    incoming.href.iter().map(|href| Event::LinkAdded {
-                    href: href.clone(),
-                    kind: ResourceKind::DERProgram,
-                })
-                // And its DERControlList link
-                .chain(
-                    link_update_events(&None, &incoming
-                        .der_control_list_link,
-                    ResourceKind::DERControlList
-                    )
-                )
-                // And its DefaultDERControl link
-                .chain(
-                    link_update_events(&None, &incoming
-                        .default_der_control_link,
-                    ResourceKind::DefaultDERControl
-                    )
-                )
-                // And its DERCurveList link
-                .chain(
-                    link_update_events(&None, &incoming.der_curve_list_link,
-                        ResourceKind::DERCurveList
-                    )
-                )
-                .collect();
-
-                entry.insert(incoming.clone());
-
-                events
-            }
-        }
+    pub fn set_der_program(self: &mut Sep2Model, incoming: &DERProgram) {
+        self.programs.insert(incoming.mrid, incoming.clone());
     }
 
     /// Upsert a DERControlList. Will upsert DERControls too.
@@ -329,14 +279,19 @@ impl Sep2Model {
         incoming: &DERControlList,
         rng: &mut ThreadRng,
     ) -> Vec<Event> {
-        let href = safe_href(incoming);
+        // We should always have a href, but for type safety let's abort early if we don't.
+        let Some(href) = require_href(incoming) else {
+            return Vec::new();
+        };
 
         let list = MRIDList {
-            items: incoming.der_control.iter().map(|derp| derp.mrid).collect(),
-            poll_rate: None,
             href: href.clone(),
+            items: incoming.der_control.iter().map(|derp| derp.mrid).collect(),
+            // The poll rate of a DERControlList is decided by the parent
+            // DERProgramList. We can safely set it to None here.
+            poll_rate: None,
         };
-        self.control_lists.insert(href.clone(), list);
+        self.control_lists.insert(href, list);
 
         // Apply all individual DERCs and return their events
         incoming
@@ -353,7 +308,6 @@ impl Sep2Model {
         rng: &mut ThreadRng,
     ) -> Vec<Event> {
         let mrid = incoming.mrid;
-        let href = safe_href(incoming);
 
         match self.controls.entry(mrid) {
             Entry::Occupied(entry) => {
@@ -429,36 +383,28 @@ impl Sep2Model {
                     && start_time.0 <= now
                     && end_time > now;
 
-                // Event that there is a new link.
-                iter::once(Event::LinkAdded {
-                    href: href.clone(),
-                    kind: ResourceKind::DERControl,
-                })
                 // Event for acknowledging this message has been received.
-                .chain(
-                    reply_to_if_required(incoming, ResponseRequired::MessageReceived).map(
-                        |reply_to| Event::DERControlStatusChanged {
-                            subject: mrid,
-                            status: ResponseStatus::EventReceived,
-                            reply_to: reply_to.clone(),
-                        },
-                    ),
-                )
-                // Event mentioning the control has already started.
-                .chain(
-                    already_started
-                        .then(|| {
-                            reply_to_if_required(incoming, ResponseRequired::SpecificResponse).map(
-                                |reply_to| Event::DERControlStatusChanged {
-                                    subject: mrid,
-                                    status: ResponseStatus::EventStarted,
-                                    reply_to: reply_to.clone(),
-                                },
-                            )
-                        })
-                        .flatten(),
-                )
-                .collect()
+                reply_to_if_required(incoming, ResponseRequired::MessageReceived)
+                    .map(|reply_to| Event::DERControlStatusChanged {
+                        subject: mrid,
+                        status: ResponseStatus::EventReceived,
+                        reply_to: reply_to.clone(),
+                    })
+                    .into_iter()
+                    // Event mentioning the control has already started.
+                    .chain(
+                        already_started
+                            .then(|| {
+                                reply_to_if_required(incoming, ResponseRequired::SpecificResponse)
+                                    .map(|reply_to| Event::DERControlStatusChanged {
+                                        subject: mrid,
+                                        status: ResponseStatus::EventStarted,
+                                        reply_to: reply_to.clone(),
+                                    })
+                            })
+                            .flatten(),
+                    )
+                    .collect()
             }
         }
     }
@@ -468,75 +414,175 @@ impl Sep2Model {
         self: &mut Sep2Model,
         incoming: &DefaultDERControl,
     ) -> Vec<Event> {
-        let href = safe_href(incoming);
-
-        let events = if self.default_controls.contains_key(&href) {
-            Vec::new()
-        } else {
-            vec![Event::LinkAdded {
-                href: href.clone(),
-                kind: ResourceKind::DefaultDERControl,
-            }]
+        // We should always have a href, but for type safety let's abort early if we don't.
+        let Some(href) = require_href(incoming) else {
+            return Vec::new();
         };
+        self.default_controls.insert(href, incoming.clone());
 
-        self.default_controls.insert(href.clone(), incoming.clone());
-
-        events
+        // No responses required.
+        Vec::new()
     }
 
     /// Upsert a DERCurveList. Will upsert DERCurves too.
     pub fn set_der_curve_list(self: &mut Sep2Model, incoming: &DERCurveList) -> Vec<Event> {
-        let href = safe_href(incoming);
+        // We should always have a href, but for type safety let's abort early if we don't.
+        let Some(href) = require_href(incoming) else {
+            return Vec::new();
+        };
 
         let list = MRIDList {
-            items: incoming.der_curve.iter().map(|curve| curve.mrid).collect(),
-            poll_rate: None,
             href: href.clone(),
+            items: incoming.der_curve.iter().map(|curve| curve.mrid).collect(),
+            // The poll rate of a DERCurveList is decided by the parent
+            // DERProgramList. We can safely set it to None here.
+            poll_rate: None,
         };
-        self.curve_lists.insert(href.clone(), list);
+        self.curve_lists.insert(href, list);
 
-        // Apply all individual DERCurves and return their events
         incoming
             .der_curve
             .iter()
-            .flat_map(|curve| self.set_der_curve(curve))
-            .collect()
+            .for_each(|curve| self.set_der_curve(curve));
+
+        // No responses required.
+        Vec::new()
     }
 
     /// Upsert a DERCurve.
-    pub fn set_der_curve(self: &mut Sep2Model, incoming: &DERCurve) -> Vec<Event> {
-        let mrid = incoming.mrid;
-        let href = safe_href(incoming);
-
-        match self.curves.entry(mrid) {
-            Entry::Occupied(mut entry) => {
-                entry.insert(incoming.clone());
-                Vec::new()
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(incoming.clone());
-                // Event that there is a new link.
-                vec![Event::LinkAdded {
-                    href: href.clone(),
-                    kind: ResourceKind::DERCurve,
-                }]
-            }
-        }
+    pub fn set_der_curve(self: &mut Sep2Model, incoming: &DERCurve) {
+        self.curves.insert(incoming.mrid, incoming.clone());
     }
 
     /// Upsert the Time
     pub fn set_time(self: &mut Sep2Model, time: &Time) -> Vec<Event> {
         self.time = time.clone();
-        // Setting time causes no events required.
+
+        // No responses required.
         Vec::new()
+    }
+
+    /// Compares the resources needed by the model against a prior set,
+    /// returning events for any that were added, changed or removed.
+    fn resource_link_events(prior: ResourceLinks, post: ResourceLinks) -> Vec<Event> {
+        let removed = prior
+            .iter()
+            .filter(|(href, _)| !post.contains_key(*href))
+            .map(|(href, resource)| Event::LinkRemoved {
+                href: href.clone(),
+                kind: resource.kind,
+            });
+        let added_or_updated = post
+            .iter()
+            .filter(|(href, resource)| prior.get(*href) != Some(*resource))
+            .map(|(href, resource)| Event::LinkAddedOrUpdated {
+                href: href.clone(),
+                kind: resource.kind,
+                poll_rate: resource.poll_rate,
+            });
+        removed.chain(added_or_updated).collect()
+    }
+
+    /// Identify all resources which the model needs to be kept up to date with,
+    /// including resources that the model currently has and resources the model
+    /// is yet to receive. Apart from Time, these are found by following links
+    /// from the EndDeviceList. Most lists use their own poll rate, and all
+    /// other resources use the poll rate of their closest parent list.
+    fn resource_links(self: &Sep2Model) -> ResourceLinks {
+        // The Time href is only known once it has been received.
+        let time = self
+            .time
+            .href
+            .iter()
+            .map(|href| resource_link(href, ResourceKind::Time, self.time.poll_rate));
+
+        let end_devices = self.end_device_list.iter().flat_map(|edl| {
+            list_links(
+                &edl.href,
+                ResourceKind::EndDeviceList,
+                ResourceKind::EndDevice,
+                edl.poll_rate,
+                list_items(Some(edl), &self.end_devices),
+                |edev| {
+                    edev.function_set_assignments_list_link
+                        .iter()
+                        .flat_map(|link| self.function_set_assignments_list_links(&link.href))
+                        .collect()
+                },
+            )
+        });
+
+        time.chain(end_devices).collect()
+    }
+
+    /// The links for a FunctionSetAssignmentsList and everything below it.
+    fn function_set_assignments_list_links(self: &Sep2Model, href: &str) -> ResourceLinks {
+        let fsal = self.function_set_assignments_lists.get(href);
+
+        list_links(
+            href,
+            ResourceKind::FunctionSetAssignmentsList,
+            ResourceKind::FunctionSetAssignments,
+            // The poll rate is unknown until the list has been received.
+            fsal.and_then(|list| list.poll_rate),
+            list_items(fsal, &self.function_set_assignments),
+            |fsa| {
+                fsa.der_program_list_link
+                    .iter()
+                    .flat_map(|link| self.der_program_list_links(&link.href))
+                    .collect()
+            },
+        )
+    }
+
+    /// The links for a DERProgramList and everything below it.
+    fn der_program_list_links(self: &Sep2Model, href: &str) -> ResourceLinks {
+        let derpl = self.program_lists.get(href);
+        // The poll rate is unknown until the list has been received. Everything
+        // below the DERProgramList uses its poll rate.
+        let poll_rate = derpl.and_then(|list| list.poll_rate);
+
+        list_links(
+            href,
+            ResourceKind::DERProgramList,
+            ResourceKind::DERProgram,
+            poll_rate,
+            list_items(derpl, &self.programs),
+            |derp| {
+                let default_control = derp.default_der_control_link.iter().map(|link| {
+                    resource_link(&link.href, ResourceKind::DefaultDERControl, poll_rate)
+                });
+                let controls = derp.der_control_list_link.iter().flat_map(|link| {
+                    list_links(
+                        &link.href,
+                        ResourceKind::DERControlList,
+                        ResourceKind::DERControl,
+                        poll_rate,
+                        list_items(self.control_lists.get(&link.href), &self.controls)
+                            .map(|control| &control.der_control),
+                        |_| ResourceLinks::new(),
+                    )
+                });
+                let curves = derp.der_curve_list_link.iter().flat_map(|link| {
+                    list_links(
+                        &link.href,
+                        ResourceKind::DERCurveList,
+                        ResourceKind::DERCurve,
+                        poll_rate,
+                        list_items(self.curve_lists.get(&link.href), &self.curves),
+                        |_| ResourceLinks::new(),
+                    )
+                });
+
+                default_control.chain(controls).chain(curves).collect()
+            },
+        )
     }
 
     /// Find an EndDevice. This is the entrypoint to the model state, from
     /// which we follow links around.
     pub fn get_end_device(self: &Sep2Model, lfdi: HexBinary160) -> Option<&EndDevice> {
-        self.end_devices
-            .values()
-            .find(|edev| edev.lfdi == Some(lfdi))
+        self.end_devices.get(&lfdi)
     }
 
     /// Find a curve by href rather than MRID.
@@ -722,55 +768,52 @@ fn generic_log_list<T: SEList>(list: &Arc<T>) {
     }
 }
 
-/// Convenience trait and function to return events for new/changed links
-trait AllLinks {
-    fn href(&self) -> String;
-}
-impl AllLinks for Link {
-    fn href(&self) -> String {
-        self.href.clone()
-    }
-}
-impl AllLinks for ListLink {
-    fn href(&self) -> String {
-        self.href.clone()
+/// A convenience function to extract the href as a String and log an error if
+/// it is not present.
+///
+/// A SEP2 server must provide HREFs for its resources so we never expect to hit
+/// this edge case and it is included for typesafety only.
+fn require_href<T: SEResource>(resource: &T) -> Option<String> {
+    match resource.href() {
+        None => {
+            log::error!(
+                "Ignoring resource {} without a href",
+                std::any::type_name::<T>()
+            );
+            None
+        }
+        Some(href) => Some(String::from(href)),
     }
 }
 
-fn link_update_events<T: AllLinks>(
-    original: &Option<T>,
-    incoming: &Option<T>,
-    resource_kind: ResourceKind,
-) -> Vec<Event> {
-    // If the hrefs are the same, no need to change subscriptions.
-    if original.as_ref().map(|x| x.href()) == incoming.as_ref().map(|x| x.href()) {
-        return Vec::new();
-    }
-
-    let old_update = original.as_ref().map(|link| Event::LinkRemoved {
-        href: link.href(),
-        kind: resource_kind,
-    });
-    let new_update = incoming.as_ref().map(|link| Event::LinkAdded {
-        href: link.href(),
-        kind: resource_kind,
-    });
-
-    [old_update, new_update]
-        .into_iter()
-        // Filter out Nones
-        .flatten()
+/// The links for a list and each of its items, all using the given poll rate.
+/// The links below each item are provided by `item_links`.
+fn list_links<'a, T: SEResource + 'a>(
+    href: &str,
+    kind: ResourceKind,
+    item_kind: ResourceKind,
+    poll_rate: Option<Uint32>,
+    items: impl Iterator<Item = &'a T>,
+    item_links: impl Fn(&T) -> ResourceLinks,
+) -> ResourceLinks {
+    iter::once(resource_link(href, kind, poll_rate))
+        .chain(items.flat_map(|item| {
+            item.href()
+                .map(|href| resource_link(href, item_kind, poll_rate))
+                .into_iter()
+                .chain(item_links(item))
+        }))
         .collect()
 }
 
-/// A convenience function to provide a href as a string.
-///
-/// While the protocol dictates that all resources returned in a GET request
-/// must have a href, we use a fallback for type safety.
-fn safe_href<T: SEResource>(resource: &T) -> String {
-    resource
-        .href()
-        .map_or_else(|| String::from("/missinghref"), String::from)
+/// Looks up each item of a list in the model, skipping any not yet received.
+fn list_items<'a, K: Eq + Hash, V>(
+    list: Option<&'a IDList<K>>,
+    items: &'a HashMap<K, V>,
+) -> impl Iterator<Item = &'a V> {
+    list.into_iter()
+        .flat_map(|list| &list.items)
+        .filter_map(|id| items.get(id))
 }
 
 #[cfg(test)]
@@ -779,6 +822,7 @@ mod tests {
 
     use sep2_common::packages::{
         edev::EndDeviceList,
+        identification::{Link, ListLink},
         objects::EventStatus,
         primitives::Uint16,
         types::{DateTimeInterval, SFDIType},
@@ -930,9 +974,58 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "List removal events are TODO"]
-    fn removing_an_item_from_list_removes_the_item() {
-        todo!();
+    fn program_list_changes_reach_its_children() {
+        let mut model = Sep2Model::default();
+        setup_model_with_mocks(&mut model);
+
+        let children = [
+            ("/edev/1/derp/1", ResourceKind::DERProgram),
+            ("/edev/1/derp/1/dderc", ResourceKind::DefaultDERControl),
+            ("/edev/1/derp/1/derc", ResourceKind::DERControlList),
+            ("/edev/1/derp/1/derc/1", ResourceKind::DERControl),
+        ];
+        let program_list = ("/edev/1/fsa/1/derp", ResourceKind::DERProgramList);
+
+        // Changing the list's poll rate announces it and everything below it
+        // with the new rate.
+        let events = model.apply_update(
+            DERProgramList {
+                poll_rate: Some(Uint32(60)),
+                ..mock_derp_list()
+            }
+            .into(),
+        );
+        let expected: Vec<_> = children
+            .into_iter()
+            .chain([program_list])
+            .map(|(href, kind)| Event::LinkAddedOrUpdated {
+                href: String::from(href),
+                kind,
+                poll_rate: Some(Uint32(60)),
+            })
+            .collect();
+        assert_eq!(events, expected);
+
+        // Removing the program from the list means everything below it is no
+        // longer needed.
+        let events = model.apply_update(
+            DERProgramList {
+                poll_rate: Some(Uint32(60)),
+                der_program: Vec::new(),
+                all: Uint32(0),
+                results: Uint32(0),
+                ..mock_derp_list()
+            }
+            .into(),
+        );
+        let expected: Vec<_> = children
+            .into_iter()
+            .map(|(href, kind)| Event::LinkRemoved {
+                href: String::from(href),
+                kind,
+            })
+            .collect();
+        assert_eq!(events, expected);
     }
 
     #[test]
@@ -1155,6 +1248,7 @@ mod tests {
     fn mock_control_with_status(status: EventStatusType) -> DERControl {
         let now = Utc::now().timestamp();
         DERControl {
+            href: Some(String::from("/edev/1/derp/1/derc/1")),
             mrid: MRIDType(42),
             event_status: EventStatus {
                 current_status: status,

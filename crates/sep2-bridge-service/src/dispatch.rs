@@ -31,9 +31,17 @@ pub async fn sep2_subscription_and_notification_dispatcher(
 ) -> Result<()> {
     while let Ok(event) = scheduler_output.recv().await {
         match event {
-            scheduler::Event::LinkAdded { href, kind } => {
+            scheduler::Event::LinkAddedOrUpdated {
+                href,
+                kind,
+                poll_rate,
+            } => {
                 sep2_conn_input
-                    .send(sep2_connection::Command::SubscribeToResource { href, kind })
+                    .send(sep2_connection::Command::SubscribeToResource {
+                        href,
+                        kind,
+                        poll_rate: poll_rate.map(|rate| rate.0),
+                    })
                     .await
                     .map_err(|_| Error::ChannelClosed)?;
             }
@@ -88,7 +96,7 @@ pub async fn control_change_dispatcher(
                     }
                 }
             }
-            scheduler::Event::LinkAdded { .. }
+            scheduler::Event::LinkAddedOrUpdated { .. }
             | scheduler::Event::LinkRemoved { .. }
             | scheduler::Event::DERControlStatusChanged { .. } => {
                 // Ignore these events

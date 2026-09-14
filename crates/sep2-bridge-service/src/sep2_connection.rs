@@ -106,6 +106,7 @@ pub enum Command {
     SubscribeToResource {
         href: String,
         kind: ResourceKind,
+        poll_rate: Option<u32>,
     },
     UnsubscribeFromResource {
         href: String,
@@ -218,7 +219,11 @@ pub async fn task(
         let is_wake_command = matches!(command, Command::Wake);
 
         match command {
-            Command::SubscribeToResource { href, kind } => {
+            Command::SubscribeToResource {
+                href,
+                kind,
+                poll_rate,
+            } => {
                 if poll_history.contains(&href) {
                     log::debug!("Not setting up poll for {href}, already polling this URI.");
                     continue;
@@ -228,7 +233,7 @@ pub async fn task(
                     kind,
                     args.client.clone(),
                     &href,
-                    args.default_poll_rate,
+                    poll_rate.unwrap_or(args.default_poll_rate),
                     args.max_list_size,
                     output_ch.clone(),
                 )
@@ -362,6 +367,8 @@ pub async fn task(
                 output_ch.clone(),
             )
             .await;
+            poll_history.insert(edev_link.href.clone());
+            poll_history.insert(tm_link.href.clone());
             setup_root_polling_done = true;
         }
 

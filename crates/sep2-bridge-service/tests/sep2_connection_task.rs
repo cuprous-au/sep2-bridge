@@ -46,6 +46,7 @@ async fn reads_resources() {
         .send(sep2_connection::Command::SubscribeToResource {
             href: String::from("/edev/1/fsa"),
             kind: sep2_bridge::ResourceKind::FunctionSetAssignmentsList,
+            poll_rate: None,
         })
         .await
         .expect("Send error");
@@ -74,6 +75,7 @@ async fn no_duplicate_polls() {
     let poll_request = sep2_connection::Command::SubscribeToResource {
         href: String::from("/edev/1/fsa"),
         kind: sep2_bridge::ResourceKind::FunctionSetAssignmentsList,
+        poll_rate: None,
     };
     input_ch
         .send(poll_request.clone())
