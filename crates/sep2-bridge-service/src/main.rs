@@ -3,12 +3,18 @@ use git_version::git_version;
 use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::packages::types::{DeviceCategoryType, PINType};
 use std::{
+    collections::HashMap,
     fs,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
+    process::ExitCode,
     time::Duration,
 };
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    signal::unix::{self, SignalKind},
+    sync::mpsc,
+    task::JoinSet,
+};
 use url::Url;
 
 use sep2_bridge::{
@@ -170,7 +176,7 @@ fn load_pin(credentials_path: PathBuf) -> Result<Option<PINType>> {
 const POLL_TICKRATE: Duration = Duration::from_secs(5);
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     let args = Args::parse();
 
     env_logger::builder().format_timestamp_millis().init();
@@ -222,11 +228,12 @@ async fn main() -> Result<()> {
     let expected_pin = load_pin(args.credentials_directory)?;
 
     let mut join_set = JoinSet::new();
+    let mut task_names = HashMap::new();
 
     // Start the SEP2 connection management task.
     let (sep2_conn_input_tx, sep2_conn_input_rx) = mpsc::channel(10);
     let (sep2_conn_output_tx, sep2_conn_output_rx) = deactivated_broadcast(10);
-    join_set.spawn({
+    let handle = join_set.spawn({
         let sep2_conn_input_tx = sep2_conn_input_tx.clone();
         async move {
             sep2_connection::task(
@@ -246,48 +253,62 @@ async fn main() -> Result<()> {
             .await
         }
     });
+    task_names.insert(handle.id(), "sep2_connection");
 
     // Start the scheduler task.
     let (scheduler_input_tx, scheduler_input_rx) = mpsc::channel(10);
     let (scheduler_output_tx, scheduler_output_rx) = deactivated_broadcast(10);
-    join_set.spawn(scheduler::task(
+    let handle = join_set.spawn(scheduler::task(
         scheduler_output_tx,
         scheduler_input_rx,
         scheduler_input_tx.clone(),
         lfdi,
     ));
+    task_names.insert(handle.id(), "scheduler");
 
     // Start the modbus task.
     let (modbus_input_tx, modbus_input_rx) = mpsc::channel(10);
     let (modbus_output_tx, modbus_output_rx) = deactivated_broadcast(10);
-    join_set.spawn(modbus_connection::task(
+    let handle = join_set.spawn(modbus_connection::task(
         modbus_output_tx,
         modbus_input_rx,
         args.modbus_socket,
         args.modbus_device_id,
     ));
+    task_names.insert(handle.id(), "modbus_connection");
 
     // Dispatch sep2_conn events to the right places.
-    join_set.spawn(dispatch::resource_update_dispatcher(
+    let handle = join_set.spawn(dispatch::resource_update_dispatcher(
         sep2_conn_output_rx.activate_cloned(),
         scheduler_input_tx.clone(),
     ));
+    task_names.insert(handle.id(), "resource_update_dispatcher");
 
     // Dispatch scheduler events to the right places.
-    join_set.spawn(dispatch::sep2_subscription_and_notification_dispatcher(
+    let handle = join_set.spawn(dispatch::sep2_subscription_and_notification_dispatcher(
         scheduler_output_rx.activate_cloned(),
         sep2_conn_input_tx.clone(),
     ));
-    join_set.spawn(dispatch::control_change_dispatcher(
+    task_names.insert(handle.id(), "sep2_subscription_and_notification_dispatcher");
+    let handle = join_set.spawn(dispatch::control_change_dispatcher(
         scheduler_output_rx.activate_cloned(),
         modbus_input_tx.clone(),
     ));
+    task_names.insert(handle.id(), "control_change_dispatcher");
 
     // Dispatch modbus_conn events to the right places.
-    join_set.spawn(dispatch::sep2_device_state_dispatcher(
+    let handle = join_set.spawn(dispatch::sep2_device_state_dispatcher(
         modbus_output_rx.activate_cloned(),
         sep2_conn_input_tx.clone(),
     ));
+    task_names.insert(handle.id(), "sep2_device_state_dispatcher");
+
+    // Install signal handlers.
+    let handle = join_set.spawn(signals_handler());
+    task_names.insert(handle.id(), "signals_handler");
+
+    // No more tasks to be created. Remove mutability on task_names.
+    let task_names = task_names;
 
     // Wake up the tasks to begin their work.
     sep2_conn_input_tx
@@ -299,12 +320,69 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::ChannelClosed)?;
 
-    // TODO: Better handling of errors that should abort the entire process.
-    for result in join_set.join_all().await {
-        result?;
+    // Await the first task to fail.
+    // Note: if the main task itself panics, the tokio runtime will clean up all
+    // tasks itself.
+    let result = join_set
+        .join_next_with_id()
+        .await
+        .expect("The join set should never be empty");
+
+    let id = match &result {
+        Ok((id, _)) => *id,
+        Err(join_err) => join_err.id(),
+    };
+    let task_name = task_names.get(&id).unwrap_or(&"unknown");
+    let exit_code = match result {
+        Err(join_err) => {
+            log::error!(
+                "The task {task_name} failed with a tokio join error: {join_err}. Stopping the process."
+            );
+            ExitCode::FAILURE
+        }
+        // Special case: graceful exit when a signal is received.
+        Ok((_, Err(Error::SignalReceived(signal)))) => {
+            log::info!("Exiting because a {signal} signal was received.");
+            ExitCode::SUCCESS
+        }
+        Ok((_, Err(err))) => {
+            log::error!("The task {task_name} errored: {err}. Stopping the process.");
+            ExitCode::FAILURE
+        }
+        Ok((_, Ok(_))) => {
+            log::error!(
+                "The task {task_name} finished without an explicit error, but no tasks are expected to finish. This is an unexpected state, stopping the process."
+            );
+            ExitCode::FAILURE
+        }
+    };
+
+    // Abort and wait on all tasks. This is not strictly necessary (tokio will
+    // abort all tasks when main ends) but it allows us to manage the clean up.
+    log::info!("Aborting all tasks.");
+    join_set.abort_all();
+    while join_set.join_next().await.is_some() {}
+
+    log::info!("Main task stopping.");
+
+    Ok(exit_code)
+}
+
+async fn signals_handler() -> Result<()> {
+    let sigint = async {
+        let mut signal =
+            unix::signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+        signal.recv().await;
+    };
+
+    let terminate = async {
+        let mut signal =
+            unix::signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        signal.recv().await;
+    };
+
+    tokio::select! {
+        _ = sigint => Err(Error::SignalReceived("SIGINT")),
+        _ = terminate => Err(Error::SignalReceived("SIGTERM")),
     }
-
-    // TODO: Ensure we clean up and persist state before we exit.
-
-    Ok(())
 }
