@@ -1674,7 +1674,7 @@ dependencies = [
 [[package]]
 name = "sep2_client"
 version = "0.1.0"
-source = "git+https://github.com/ethanndickson/sep2_client.git?rev=cc86179b013517d0681130d1f7adc605aca2b95d#cc86179b013517d0681130d1f7adc605aca2b95d"
+source = "git+https://github.com/pengwyn/sep2_client.git?branch=cancel-update-polls#9f357352f5fa89d840eb7ce51201da55a078a13f"
 dependencies = [
  "ahash",
  "anyhow",

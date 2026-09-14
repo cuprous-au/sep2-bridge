@@ -20,7 +20,8 @@ num-traits = "0.2.19"
 rand = "0.10.2"
 regex = "1.13.1"
 reqwest = "0.12"
-sep2_client = { git = "https://github.com/ethanndickson/sep2_client.git", rev = "cc86179b013517d0681130d1f7adc605aca2b95d" }
+#sep2_client = { git = "https://github.com/ethanndickson/sep2_client.git", rev = "cc86179b013517d0681130d1f7adc605aca2b95d" }
+sep2_client = { git = "https://github.com/pengwyn/sep2_client.git", branch = "cancel-update-polls" }
 sep2_common = "0.1.0"
 serde = "1"
 serde_json = "1"

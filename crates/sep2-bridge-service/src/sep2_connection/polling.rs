@@ -1,5 +1,5 @@
 use async_broadcast::Sender as BroadcastSender;
-use sep2_client::client::{Client, PollCallback};
+use sep2_client::client::{Client, PollCallback, PollId};
 use sep2_common::{
     packages::{
         der::{DERControlList, DERCurveList, DERProgramList, DefaultDERControl},
@@ -12,6 +12,11 @@ use sep2_common::{
 };
 
 use crate::{ResourceKind, sep2_connection::Sep2ResourceEvent};
+
+pub struct EstablishedPoll {
+    pub id: PollId,
+    pub poll_rate: u32,
+}
 
 /// Make a callback function to feed a resource into the broadcast channel.
 pub fn make_poll_callback<T>(
@@ -37,8 +42,7 @@ pub async fn start_poll_for(
     poll_rate: u32,
     max_list_size: u32,
     broadcast: BroadcastSender<super::Sep2ResourceEvent>,
-) {
-    log::trace!("Setting up poll for {href}");
+) -> Option<EstablishedPoll> {
     let kind_href = match kind {
         // Singular items use the href as is.
         ResourceKind::Time
@@ -55,82 +59,84 @@ pub async fn start_poll_for(
         | ResourceKind::DERCurveList
         | ResourceKind::DERControlList => &paginated_uri(href, max_list_size),
     };
-    match kind {
-        ResourceKind::Time => {
+    let poll_id = match kind {
+        ResourceKind::Time => Some(
             get_then_poll(
                 client,
                 kind_href,
                 poll_rate,
                 make_poll_callback::<Time>(broadcast),
             )
-            .await
-        }
-        ResourceKind::EndDeviceList => {
+            .await,
+        ),
+        ResourceKind::EndDeviceList => Some(
             get_then_poll(
                 client,
                 kind_href,
                 poll_rate,
                 make_poll_callback::<EndDeviceList>(broadcast),
             )
-            .await
-        }
-        ResourceKind::FunctionSetAssignmentsList => {
+            .await,
+        ),
+        ResourceKind::FunctionSetAssignmentsList => Some(
             get_then_poll(
                 client,
                 kind_href,
                 poll_rate,
                 make_poll_callback::<FunctionSetAssignmentsList>(broadcast),
             )
-            .await
-        }
-        ResourceKind::DERProgramList => {
+            .await,
+        ),
+        ResourceKind::DERProgramList => Some(
             get_then_poll(
                 client,
                 kind_href,
                 poll_rate,
                 make_poll_callback::<DERProgramList>(broadcast),
             )
-            .await
-        }
-        ResourceKind::DERControlList => {
+            .await,
+        ),
+        ResourceKind::DERControlList => Some(
             get_then_poll(
                 client,
                 kind_href,
                 poll_rate,
                 make_poll_callback::<DERControlList>(broadcast),
             )
-            .await
-        }
-        ResourceKind::DefaultDERControl => {
+            .await,
+        ),
+        ResourceKind::DefaultDERControl => Some(
             get_then_poll(
                 client,
                 kind_href,
                 poll_rate,
                 make_poll_callback::<DefaultDERControl>(broadcast),
             )
-            .await
-        }
-        ResourceKind::DERCurveList => {
+            .await,
+        ),
+        ResourceKind::DERCurveList => Some(
             get_then_poll(
                 client,
                 kind_href,
                 poll_rate,
                 make_poll_callback::<DERCurveList>(broadcast),
             )
-            .await
-        }
+            .await,
+        ),
         // These are no-ops: we don't want to subscribe to them individually as they will be obtained by a list subscription instead.
         ResourceKind::EndDevice
         | ResourceKind::FunctionSetAssignments
         | ResourceKind::DERProgram
         | ResourceKind::DERControl
-        | ResourceKind::DERCurve => {}
+        | ResourceKind::DERCurve => None,
     };
+
+    poll_id.map(|id| EstablishedPoll { id, poll_rate })
 }
 
 /// Convenience function to get the resource immediately instead of waiting for
 /// the first poll event.
-pub async fn get_then_poll<T, U>(client: Client, href: &str, poll_rate: u32, callback: T)
+pub async fn get_then_poll<T, U>(client: Client, href: &str, poll_rate: u32, callback: T) -> PollId
 where
     T: PollCallback<U>,
     U: SEResource,
@@ -146,7 +152,7 @@ where
 
     client
         .start_poll(href, Some(Uint32(poll_rate)), callback)
-        .await;
+        .await
 }
 
 pub fn paginated_uri(uri: &str, max_list_size: u32) -> String {
