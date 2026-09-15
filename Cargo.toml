@@ -35,3 +35,6 @@ proptest = "1.6.0"
 
 [patch.crates-io]
 sep2_common = { git = "https://github.com/ethanndickson/sep2_common.git", rev = "c87adacf1fd6922f545475ddc60fdf6b1d3bf8f0" }
+
+[profile.release]
+panic = "abort"

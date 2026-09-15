@@ -22,6 +22,8 @@ pub enum Error {
     ItemDetailsUnknown,
     #[display("Channel was closed when trying to send.")]
     ChannelClosed,
+    #[display("A {_0} signal was received.")]
+    SignalReceived(&'static str),
 }
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
