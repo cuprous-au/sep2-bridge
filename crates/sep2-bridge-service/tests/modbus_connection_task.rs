@@ -193,7 +193,7 @@ async fn reads_device_state() {
                     st, soc, ..
                 }),
                 Some(Settings {
-                    esv_hi
+                    esv_hi, ..
                 }),
                 Some(Metering {
                     w, ..
