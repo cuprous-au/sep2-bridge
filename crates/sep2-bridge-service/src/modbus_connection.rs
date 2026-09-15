@@ -82,13 +82,18 @@ pub struct Parameters {
 
     // AS5438 - Table E.7, Section E.4.5
     pub der_trip_lv_must: Option<Curve<u16, u32>>,
+    pub der_trip_lv_may: Option<Curve<u16, u32>>,
     pub der_trip_lv_mom_cess: Option<Curve<u16, u32>>,
     pub der_trip_hv_must: Option<Curve<u16, u32>>,
+    pub der_trip_hv_may: Option<Curve<u16, u32>>,
     pub der_trip_hv_mom_cess: Option<Curve<u16, u32>>,
 
     // AS5438 - Table E.8, Section E.4.6
-    pub der_trip_lf: Option<Curve<u32, u32>>,
-    pub der_trip_hf: Option<Curve<u32, u32>>,
+    // Note: CSIP does not define a mom_cess for lfrt and hfrt curves.
+    pub der_trip_lf_must: Option<Curve<u32, u32>>,
+    pub der_trip_lf_may: Option<Curve<u32, u32>>,
+    pub der_trip_hf_must: Option<Curve<u32, u32>>,
+    pub der_trip_hf_may: Option<Curve<u32, u32>>,
 
     // AS5438 - Table E.9, Section E.4.7
     pub droop_ctl: Option<Model711Ctl>,
@@ -959,7 +964,7 @@ async fn send_model707_parameters(
     let wrote_curve = Model707::write_curves(
         device,
         parameters.der_trip_lv_must.as_ref(),
-        None,
+        parameters.der_trip_lv_may.as_ref(),
         parameters.der_trip_lv_mom_cess.as_ref(),
     )
     .await?;
@@ -990,7 +995,7 @@ async fn send_model708_parameters(
     let wrote_curve = Model708::write_curves(
         device,
         parameters.der_trip_hv_must.as_ref(),
-        None,
+        parameters.der_trip_hv_may.as_ref(),
         parameters.der_trip_hv_mom_cess.as_ref(),
     )
     .await?;
@@ -1018,8 +1023,13 @@ async fn send_model709_parameters(
     }
 
     // AS5438 - Table E.8, Section E.4.6
-    let wrote_curve =
-        Model709::write_curves(device, parameters.der_trip_lf.as_ref(), None, None).await?;
+    let wrote_curve = Model709::write_curves(
+        device,
+        parameters.der_trip_lf_must.as_ref(),
+        parameters.der_trip_lf_may.as_ref(),
+        None,
+    )
+    .await?;
 
     device
         .write_point(
@@ -1045,8 +1055,13 @@ async fn send_model710_parameters(
     }
 
     // AS5438 - Table E.8, Section E.4.6
-    let wrote_curve =
-        Model710::write_curves(device, parameters.der_trip_hf.as_ref(), None, None).await?;
+    let wrote_curve = Model710::write_curves(
+        device,
+        parameters.der_trip_hf_must.as_ref(),
+        parameters.der_trip_hf_may.as_ref(),
+        None,
+    )
+    .await?;
 
     device
         .write_point(

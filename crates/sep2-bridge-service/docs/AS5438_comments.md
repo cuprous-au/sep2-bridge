@@ -70,6 +70,12 @@ the curve SunSpec group and sent along with the curve data in curve 2.
 This table references model 706 for one point but 705 for the others. It is
 assumed this is a typo and the curve applies only to model 706.
 
+## Tables E.7 and E.8 (Sections E.4.5 and E.4.6)
+
+These tables refer to only a subset of curve types. As it is trivial to extend
+to all curve types, we include "Must Trip", "May Trip" and "Momentary Cessation"
+for all models, when CSIP-AUS also defines that curve.
+
 ## Table E.9 (Section E.4.7)
 
 The frequency droop SunSpec group is a repeating group `711.Ctl`. This follows a

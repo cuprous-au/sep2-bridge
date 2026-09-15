@@ -114,10 +114,7 @@ impl TryFrom<ModbusCapabilities> for DERCapability {
             rtg_v_nom: caps.v_nom_rtg.convert(),
             rtg_max_v: caps.v_max_rtg.convert(),
             rtg_min_v: caps.v_min_rtg.convert(),
-            modes_supported: caps
-                .ctrl_modes
-                .try_convert()
-                .map_err(|err| err.name("modes_supported"))?,
+            modes_supported: caps.ctrl_modes.convert(),
             rtg_reactive_susceptance: caps.react_suscept_rtg.convert(),
             ..Default::default()
         })
@@ -432,6 +429,14 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
                 .map(|c| convert_curve(c, AxisOrder::Flipped))
                 .transpose()
                 .map_err(|err| err.name("der_trip_lv_must"))?,
+            der_trip_lv_may: attrs
+                .inner
+                .der_control_base
+                .op_mod_lvrt_may_trip
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_lv_may"))?,
             der_trip_lv_mom_cess: attrs
                 .inner
                 .der_control_base
@@ -448,6 +453,14 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
                 .map(|c| convert_curve(c, AxisOrder::Flipped))
                 .transpose()
                 .map_err(|err| err.name("der_trip_hv_must"))?,
+            der_trip_hv_may: attrs
+                .inner
+                .der_control_base
+                .op_mod_hvrt_may_trip
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_hv_may"))?,
             der_trip_hv_mom_cess: attrs
                 .inner
                 .der_control_base
@@ -458,22 +471,38 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
                 .map_err(|err| err.name("der_trip_hv_mom_cess"))?,
 
             // AS5438 - Table F.8 to E.8
-            der_trip_lf: attrs
+            der_trip_lf_must: attrs
                 .inner
                 .der_control_base
                 .op_mod_lfrt_must_trip
                 .and_then(get_curve_data)
                 .map(|c| convert_curve(c, AxisOrder::Flipped))
                 .transpose()
-                .map_err(|err| err.name("der_trip_lf"))?,
-            der_trip_hf: attrs
+                .map_err(|err| err.name("der_trip_lf_must"))?,
+            der_trip_lf_may: attrs
+                .inner
+                .der_control_base
+                .op_mod_lfrt_may_trip
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_lf_may"))?,
+            der_trip_hf_must: attrs
                 .inner
                 .der_control_base
                 .op_mod_hfrt_must_trip
                 .and_then(get_curve_data)
                 .map(|c| convert_curve(c, AxisOrder::Flipped))
                 .transpose()
-                .map_err(|err| err.name("der_trip_hf"))?,
+                .map_err(|err| err.name("der_trip_hf_must"))?,
+            der_trip_hf_may: attrs
+                .inner
+                .der_control_base
+                .op_mod_hfrt_may_trip
+                .and_then(get_curve_data)
+                .map(|c| convert_curve(c, AxisOrder::Flipped))
+                .transpose()
+                .map_err(|err| err.name("der_trip_hf_may"))?,
 
             // AS5438 - Table F.9 to E.9
             droop_ctl: attrs.inner.der_control_base.op_mod_freq_droop.convert(),
@@ -693,11 +722,61 @@ impl Convert<VoltageRMS> for u16 {
     }
 }
 
-impl TryConvert<DERControlType> for Option<CtrlModes> {
-    fn try_convert(self: Option<CtrlModes>) -> ResultUnnamed<DERControlType> {
+impl Convert<DERControlType> for Option<CtrlModes> {
+    fn convert(self: Option<CtrlModes>) -> DERControlType {
         match self {
-            None => Ok(DERControlType::empty()),
-            Some(_todo) => Err(Error::Unknown),
+            None => DERControlType::empty(),
+            Some(ctrl_modes) => ctrl_modes
+            .iter()
+            .filter_map(|flag| {
+                match flag {
+                    CtrlModes::MaxW => Some(DERControlType::OpModMaxLimW),
+                    CtrlModes::FixedW => Some(DERControlType::OpModFixedW),
+                    CtrlModes::FixedVar => Some(DERControlType::OpModFixedVar),
+                    CtrlModes::FixedPf => Some(
+                        DERControlType::OpModFixedPFInjectW
+                      | DERControlType::OpModFixedPFAbsorbW
+                    ),
+                    CtrlModes::VoltVar => Some(DERControlType::OpModVoltVar),
+                    CtrlModes::LvTrip => Some(
+                        DERControlType::OpModLVRTMustTrip
+                      | DERControlType::OpModLVRTMayTrip
+                      | DERControlType::OpModLVRTMomentaryCessation
+                    ),
+                    CtrlModes::HvTrip => Some(
+                        DERControlType::OpModHVRTMustTrip
+                      | DERControlType::OpModHVRTMayTrip
+                      | DERControlType::OpModHVRTMomentaryCessation
+                    ),
+                    CtrlModes::VoltWatt => Some(DERControlType::OpModVoltWatt),
+                    // Note that CSIP doesn't allow for a LFRT/HFRT Momentary Cessation.
+                    CtrlModes::LfTrip => Some(
+                        DERControlType::OpModLFRTMustTrip
+                      | DERControlType::OpModLFRTMayTrip
+                    ),
+                    CtrlModes::HfTrip => Some(
+                        DERControlType::OpModHFRTMustTrip
+                      | DERControlType::OpModHFRTMayTrip
+                    ),
+                    // Not currently supported by the bridge.
+                    CtrlModes::FreqWatt
+                    | CtrlModes::WattVar
+                    // Scheduled is not something we expect from a device. But
+                    // we don't need to convert it anyway - because we are
+                    // communicating with upstream via CSIP-AUS, that implicitly
+                    // indicates we support scheduling.
+                    | CtrlModes::Scheduled
+                    // DynReactCurr is a difficult one to map, but it is
+                    // apparently deprecated.
+                    | CtrlModes::DynReactCurr => None,
+                    // Every other bit that might be set past all known names.
+                    unknown => {
+                        log::debug!("Unknown CtrlModes bits: {unknown:?}. Is the device SunSpec compatible? Ignoring.");
+                        None
+                    },
+                }
+            })
+            .collect()
         }
     }
 }
@@ -739,8 +818,7 @@ impl TryConvert<ConnectStatusType> for model701::ConnSt {
 
 impl TryConvert<DERAlarmStatus> for model701::Alrm {
     fn try_convert(self: model701::Alrm) -> ResultUnnamed<DERAlarmStatus> {
-        Ok(self
-            .iter()
+        self.iter()
             .map(|flag| {
                 match flag {
                     model701::Alrm::DcOverVolt => Ok(DERAlarmStatus::DER_FAULT_OVER_VOLTAGE),
@@ -768,9 +846,7 @@ impl TryConvert<DERAlarmStatus> for model701::Alrm {
                     _ => Err(Error::UnmappableInvalid),
                 }
             })
-            .collect::<ResultUnnamed<Vec<_>>>()?
-            .into_iter()
-            .fold(DERAlarmStatus::empty(), |x, y| x | y))
+            .collect()
     }
 }
 
@@ -1277,8 +1353,7 @@ mod tests {
             v_nom_rtg: Some(50),
             v_max_rtg: Some(51),
             v_min_rtg: Some(52),
-            // TODO: once this is translatable, add a value back in.
-            ctrl_modes: None,
+            ctrl_modes: Some(CtrlModes::MaxW | CtrlModes::HfTrip),
             react_suscept_rtg: Some(53),
         };
 

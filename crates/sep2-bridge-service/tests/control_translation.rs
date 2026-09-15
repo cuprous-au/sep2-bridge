@@ -138,15 +138,15 @@ const EXPECTED_DER_TRIP_HV_MOM_CESS_DATA: &[(u16, u32)] = &[(2000, 190), (2200, 
 
 // Table 8. Note that SEP2 and Sunspec choose the opposite ordering for the x/y
 // axes in these cases.
-const OP_MOD_LFRT_DATA: &[(i32, i32)] = &[(1, 1), (2, 3)];
+const OP_MOD_LFRT_MUST_DATA: &[(i32, i32)] = &[(1, 1), (2, 3)];
 const OP_MOD_LFRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
 const OP_MOD_LFRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Kilo;
-const EXPECTED_DER_TRIP_LF_DATA: &[(u32, u32)] = &[(100, 10), (300, 20)];
+const EXPECTED_DER_TRIP_LF_MUST_DATA: &[(u32, u32)] = &[(100, 10), (300, 20)];
 
-const OP_MOD_HFRT_DATA: &[(i32, i32)] = &[(40, 400), (50, 600)];
+const OP_MOD_HFRT_MUST_DATA: &[(i32, i32)] = &[(40, 400), (50, 600)];
 const OP_MOD_HFRT_SF_X: PowerOfTenMultiplierType = PowerOfTenMultiplierType::None;
 const OP_MOD_HFRT_SF_Y: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Deci;
-const EXPECTED_DER_TRIP_HF_DATA: &[(u32, u32)] = &[(4, 0), (6, 1)];
+const EXPECTED_DER_TRIP_HF_MUST_DATA: &[(u32, u32)] = &[(4, 0), (6, 1)];
 
 // Table 9. frequency droop values are thousandths in SEP2, except for the time
 // which is hundredths of a second.
@@ -290,7 +290,7 @@ async fn applies_as5438_table_8() {
     assert_curve_data(
         &mock,
         "model709::CRV_2_ACT_PT",
-        EXPECTED_DER_TRIP_LF_DATA,
+        EXPECTED_DER_TRIP_LF_MUST_DATA,
         model709::MustTrip::LEN,
     )
     .await;
@@ -303,7 +303,7 @@ async fn applies_as5438_table_8() {
     assert_curve_data(
         &mock,
         "model710::CRV_2_ACT_PT",
-        EXPECTED_DER_TRIP_HF_DATA,
+        EXPECTED_DER_TRIP_HF_MUST_DATA,
         model710::MustTrip::LEN,
     )
     .await;
@@ -881,7 +881,7 @@ async fn setup_control_mocks(mock: &MockServer) {
         href: Some(HREF_LFRT_MUST_TRIP_CURVE.into()),
         mrid: MRIDType(1001),
 
-        curve_data: OP_MOD_LFRT_DATA
+        curve_data: OP_MOD_LFRT_MUST_DATA
             .iter()
             .map(|(x, y)| CurveData {
                 xvalue: Int32(*x),
@@ -897,7 +897,7 @@ async fn setup_control_mocks(mock: &MockServer) {
         href: Some(HREF_HFRT_MUST_TRIP_CURVE.into()),
         mrid: MRIDType(1002),
 
-        curve_data: OP_MOD_HFRT_DATA
+        curve_data: OP_MOD_HFRT_MUST_DATA
             .iter()
             .map(|(x, y)| CurveData {
                 xvalue: Int32(*x),
