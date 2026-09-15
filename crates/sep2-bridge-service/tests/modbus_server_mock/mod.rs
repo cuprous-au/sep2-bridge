@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use sunspec::models::model1::Model1;
 use sunspec::models::model103::Model103;
 use sunspec::models::model701::{self, Model701};
-use sunspec::models::model702::Model702;
+use sunspec::models::model702::{CtrlModes, Model702};
 use sunspec::models::model703::{self, Model703};
 use sunspec::models::model704::{self, Model704};
 use sunspec::models::model705::{self, Model705};
@@ -421,7 +421,25 @@ pub fn add_model_702(
     Model702::V_NOM_RTG.fill_registers(registers, offset, Some(9000));
     Model702::V_MAX_RTG.fill_registers(registers, offset, Some(9100));
     Model702::V_MIN_RTG.fill_registers(registers, offset, Some(8900));
-    Model702::CTRL_MODES.fill_registers(registers, offset, None);
+    Model702::CTRL_MODES.fill_registers(
+        registers,
+        offset,
+        Some(
+            // Pretty much everything we support
+            CtrlModes::MaxW
+                | CtrlModes::FixedW
+                | CtrlModes::FixedVar
+                | CtrlModes::FixedPf
+                | CtrlModes::VoltVar
+                | CtrlModes::FreqWatt
+                | CtrlModes::LvTrip
+                | CtrlModes::HvTrip
+                | CtrlModes::WattVar
+                | CtrlModes::VoltWatt
+                | CtrlModes::LfTrip
+                | CtrlModes::HfTrip,
+        ),
+    );
     Model702::REACT_SUSCEPT_RTG.fill_registers(registers, offset, Some(1234));
 
     offset + usize::from(Model702::LEN)
