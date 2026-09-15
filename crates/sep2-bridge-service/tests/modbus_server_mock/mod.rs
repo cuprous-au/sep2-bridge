@@ -218,6 +218,7 @@ impl tokio_modbus::server::Service for SunSpecService {
                 ready(Ok(Some(Response::ReadInputRegisters(data))))
             }
             Request::WriteSingleRegister(addr_u16, value) => {
+                eprintln!("Write {addr_u16}: {value:?}");
                 let addr = usize::from(addr_u16);
                 // Minimal checking
                 if addr >= regs.len() {
@@ -228,6 +229,7 @@ impl tokio_modbus::server::Service for SunSpecService {
                 }
             }
             Request::WriteMultipleRegisters(addr_u16, values) => {
+                eprintln!("Write {addr_u16}: {values:?}");
                 let addr = usize::from(addr_u16);
                 // Minimal checking
                 if addr + values.len() > regs.len() {

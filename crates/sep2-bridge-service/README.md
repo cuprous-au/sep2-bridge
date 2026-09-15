@@ -12,6 +12,19 @@ device, several other parameters not mentioned in AS5438 are also required. The
 details of the changes made to be compatible with AS5438 are described in
 [AS5438_comments](docs/AS5438_comments.md).
 
+## Mock SunSpec device
+
+The SunSpec Modbus mock used by the integration tests
+(`tests/modbus_server_mock`) can also be run standalone, to give the
+sep2-bridge a device to talk to without real hardware:
+```
+cargo run --example sunspec_mock -- --addr 127.0.0.1:5020 --models 1,701,704
+```
+Both arguments are optional; by default it listens on `127.0.0.1:5020` and
+exposes every model it supports. Then point the sep2-bridge at it with
+`--modbus-socket tcp://127.0.0.1:5020`. The mock logs each connection and every
+register write it receives.
+
 ## Testing with envoy
 
 Envoy is a CSIP-AUS server developed by the BSGIP at ANU. We can use it here to
@@ -63,6 +76,9 @@ cargo run --bin sep2-bridge -- \
   --default-poll-rate 15 \
   --modbus-socket=unix:///tmp/a.sock
 ```
+If you need a mocked SunSpec device, run the command in the the [mock SunSpec
+device](#mock-sunspec-device) section and use
+`--modbus-socket=tcp://127.0.0.1:5020` instead.
 
 What will the test do?
 
