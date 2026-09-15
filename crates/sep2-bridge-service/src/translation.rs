@@ -62,7 +62,7 @@ impl std::fmt::Display for NamedError {
 #[derive(Clone, Debug, Display)]
 pub enum Error {
     UnsignedNegative,
-    SignedOverflow,
+    IntegerOverflow,
     MandatoryNone,
     UnmappableInvalid,
     OutOfRange,
@@ -155,8 +155,27 @@ impl TryFrom<ModbusSettings> for DERSettings {
         Ok(DERSettings {
             set_es_high_volt: settings
                 .esv_hi
+                .map(|val| val.rescale(SEP2_HUNDREDTHS_SF).value)
                 .try_convert()
                 .map_err(|err| err.name("set_es_high_volt"))?,
+            set_es_low_volt: settings
+                .esv_lo
+                .map(|val| val.rescale(SEP2_HUNDREDTHS_SF).value)
+                .try_convert()
+                .map_err(|err| err.name("set_es_low_volt"))?,
+            set_es_high_freq: settings
+                .es_hz_hi
+                .map(|val| val.rescale(SEP2_HUNDREDTHS_SF).value)
+                .try_convert()
+                .map_err(|err| err.name("set_es_high_freq"))?,
+            set_es_low_freq: settings
+                .es_hz_lo
+                .map(|val| val.rescale(SEP2_HUNDREDTHS_SF).value)
+                .try_convert()
+                .map_err(|err| err.name("set_es_low_freq"))?,
+            set_es_delay: settings.es_dly_tms.map(seconds_to_hundredths).convert(),
+            set_es_random_delay: settings.es_rnd_tms.map(seconds_to_hundredths).convert(),
+            set_es_ramp_tms: settings.es_rmp_tms.map(seconds_to_hundredths).convert(),
             updated_time: Int64(Utc::now().timestamp()),
             ..Default::default()
         })
@@ -598,6 +617,11 @@ fn hundredths_to_seconds(hundredths_of_a_second: u32) -> u32 {
         .rescale(SUNSPEC_SECONDS_SF)
         .value
 }
+fn seconds_to_hundredths(seconds: u32) -> u32 {
+    ScaledValue::new(seconds, SUNSPEC_SECONDS_SF)
+        .rescale(SEP2_HUNDREDTHS_SF)
+        .value
+}
 
 //////
 // Internals
@@ -665,15 +689,22 @@ where
 impl TryConvert<Int16> for u16 {
     fn try_convert(self: u16) -> ResultUnnamed<Int16> {
         Ok(Int16(
-            i16::try_from(self).map_err(|_| Error::SignedOverflow)?,
+            i16::try_from(self).map_err(|_| Error::IntegerOverflow)?,
         ))
     }
 }
 
-// Int16s appear in percentages, which have a granularity of hundredths in SEP2.
-impl TryConvert<Int16> for ScaledValue<u16> {
-    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<Int16> {
-        self.rescale(SEP2_HUNDREDTHS_SF).value.try_convert()
+impl TryConvert<Uint16> for u32 {
+    fn try_convert(self: u32) -> ResultUnnamed<Uint16> {
+        Ok(Uint16(
+            u16::try_from(self).map_err(|_| Error::IntegerOverflow)?,
+        ))
+    }
+}
+
+impl Convert<Uint32> for u32 {
+    fn convert(self: u32) -> Uint32 {
+        Uint32(self)
     }
 }
 
@@ -707,7 +738,7 @@ impl Convert<ApparentPower> for u16 {
 impl TryConvert<ReactivePower> for u16 {
     fn try_convert(self: u16) -> ResultUnnamed<ReactivePower> {
         Ok(ReactivePower {
-            value: Int16(i16::try_from(self).map_err(|_| Error::SignedOverflow)?),
+            value: Int16(i16::try_from(self).map_err(|_| Error::IntegerOverflow)?),
             multiplier: PowerOfTenMultiplierType::None,
         })
     }
@@ -928,19 +959,19 @@ impl TryConvert<u16> for Int32 {
             return Err(Error::UnsignedNegative);
         }
 
-        u16::try_from(self.0).map_err(|_| Error::SignedOverflow)
+        u16::try_from(self.0).map_err(|_| Error::IntegerOverflow)
     }
 }
 
 impl TryConvert<i16> for Int32 {
     fn try_convert(self: Int32) -> ResultUnnamed<i16> {
-        i16::try_from(self.0).map_err(|_| Error::SignedOverflow)
+        i16::try_from(self.0).map_err(|_| Error::IntegerOverflow)
     }
 }
 
 impl TryConvert<u16> for Uint32 {
     fn try_convert(self: Uint32) -> ResultUnnamed<u16> {
-        u16::try_from(self.0).map_err(|_| Error::SignedOverflow)
+        u16::try_from(self.0).map_err(|_| Error::IntegerOverflow)
     }
 }
 
@@ -1211,7 +1242,7 @@ mod tests {
         #[test]
         fn too_large_to_signed_fails(x in ((i16::MAX as u16)+1u16)..u16::MAX) {
             let result: ResultUnnamed<Int16> = x.try_convert();
-            assert!(matches!(result, Err(Error::SignedOverflow)));
+            assert!(matches!(result, Err(Error::IntegerOverflow)));
         }
 
         #[test]
@@ -1280,6 +1311,12 @@ mod tests {
     fn settings() {
         let settings = ModbusSettings {
             esv_hi: Some(ScaledValue::new(42, SEP2_HUNDREDTHS_SF)),
+            esv_lo: Some(ScaledValue::new(43, SEP2_HUNDREDTHS_SF)),
+            es_hz_hi: Some(ScaledValue::new(44, SEP2_THOUSANDTHS_SF)),
+            es_hz_lo: Some(ScaledValue::new(45, SEP2_THOUSANDTHS_SF)),
+            es_dly_tms: Some(46),
+            es_rnd_tms: Some(47),
+            es_rmp_tms: Some(48),
         };
 
         let result: Result<DERSettings> = settings.try_into();
@@ -1292,6 +1329,7 @@ mod tests {
         // A value of 24.5% translated.
         let settings = ModbusSettings {
             esv_hi: Some(ScaledValue::new(245, -1)),
+            ..Default::default()
         };
 
         let result: DERSettings = settings.try_into().expect("Translation failed");

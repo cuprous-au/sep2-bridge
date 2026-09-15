@@ -464,19 +464,35 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Settings {
     pub esv_hi: Option<ScaledValue<u16>>,
-    // TODO: Add the remaining settings required by AS5438
+    pub esv_lo: Option<ScaledValue<u16>>,
+    pub es_hz_hi: Option<ScaledValue<u32>>,
+    pub es_hz_lo: Option<ScaledValue<u32>>,
+    pub es_dly_tms: Option<u32>,
+    pub es_rnd_tms: Option<u32>,
+    pub es_rmp_tms: Option<u32>,
 }
 
 impl Settings {
     fn from(m703: &Option<Model703>) -> Option<Self> {
-        m703.as_ref().map(|m703| Settings {
-            // Extract the voltage with its scale factor.
-            esv_hi: m703
-                .esv_hi
-                .map(|esv_hi| ScaledValue::new(esv_hi, m703.v_sf.unwrap_or_default())),
+        m703.as_ref().map(|m703| {
+            let v_sf = m703.v_sf.unwrap_or_default();
+            let hz_sf = m703.hz_sf.unwrap_or_default();
+            Settings {
+                esv_hi: m703.esv_hi.map(|esv_hi| ScaledValue::new(esv_hi, v_sf)),
+                esv_lo: m703.esv_lo.map(|esv_lo| ScaledValue::new(esv_lo, v_sf)),
+                es_hz_hi: m703
+                    .es_hz_hi
+                    .map(|es_hz_hi| ScaledValue::new(es_hz_hi, hz_sf)),
+                es_hz_lo: m703
+                    .es_hz_lo
+                    .map(|es_hz_lo| ScaledValue::new(es_hz_lo, hz_sf)),
+                es_dly_tms: m703.es_dly_tms,
+                es_rnd_tms: m703.es_rnd_tms,
+                es_rmp_tms: m703.es_rmp_tms,
+            }
         })
     }
 }
