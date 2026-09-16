@@ -53,11 +53,11 @@ async fn requests_polling() {
         HREF_HFRT_MUST_TRIP_CURVE,
     ];
 
-    // Expect that each of the resources was queried.
+    // Expect that each of the resources was queried, including the
+    // EndDeviceList which is announced once it has been received.
     let mut resources_to_be_queried: HashSet<_> = resource_map
         .keys()
         .cloned()
-        .filter(|k| *k != HREF_EDEVL)
         .chain(additional_hrefs.iter().cloned())
         .collect();
 
@@ -68,7 +68,7 @@ async fn requests_polling() {
             .expect("Recv error");
 
         match event {
-            scheduler::Event::LinkAdded { href, kind: _ } => {
+            scheduler::Event::LinkAddedOrUpdated { href, .. } => {
                 if !resources_to_be_queried.remove(href.as_str()) {
                     panic!("Resource {href} queried twice or should never be queried.");
                 }
@@ -225,10 +225,10 @@ async fn produces_schedule_on_time() {
         .await
         .expect("Send failure");
     // Skip past the events generated while applying the resources above, up to
-    // and including the LinkAdded for the control just sent.
+    // and including the LinkAddedOrUpdated for the control just sent.
     recv_until(
         &mut output_ch,
-        |event| matches!(event, scheduler::Event::LinkAdded { href, .. } if href == HREF_DERC_1),
+        |event| matches!(event, scheduler::Event::LinkAddedOrUpdated { href, .. } if href == HREF_DERC_1),
     )
     .await;
     // The remaining events for that control follow immediately, so check for

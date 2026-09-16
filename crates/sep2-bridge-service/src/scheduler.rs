@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use sep2_common::packages::{
     der::{DERControl, DERCurve, DefaultDERControl},
     identification::{ResponseRequired, ResponseStatus},
-    primitives::{HexBinary160, Int64},
+    primitives::{HexBinary160, Int64, Uint32},
     types::MRIDType,
 };
 use std::sync::Arc;
@@ -27,10 +27,16 @@ pub enum Command {
 /// Events emitted when changes made to the model require external effects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// A new link has appeared in the model.
-    LinkAdded { href: String, kind: ResourceKind },
+    /// A new resource is required by the model, or the poll rate that applies
+    /// to an existing resource has changed. A poll rate of `None` means the
+    /// default applies.
+    LinkAddedOrUpdated {
+        href: String,
+        kind: ResourceKind,
+        poll_rate: Option<Uint32>,
+    },
 
-    /// A link has disappeared from the model.
+    /// A resource is no longer needed by the model.
     LinkRemoved { href: String, kind: ResourceKind },
 
     /// The parameters derived from the model have changed.
