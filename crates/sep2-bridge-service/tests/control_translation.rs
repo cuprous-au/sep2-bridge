@@ -582,12 +582,10 @@ async fn setup() -> (
     let (sep2_conn_input_tx, sep2_conn_input_rx) = mpsc::channel(10);
     let (sep2_conn_output_tx, sep2_conn_output_rx) = deactivated_broadcast(10);
     join_set.spawn({
-        let sep2_conn_input_tx = sep2_conn_input_tx.clone();
         async move {
             sep2_connection::task(
                 sep2_conn_output_tx,
                 sep2_conn_input_rx,
-                sep2_conn_input_tx,
                 sep2_connection::Sep2ConnectionArgs {
                     client,
                     dcap_uri: String::from("/dcap"),

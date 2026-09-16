@@ -31,12 +31,11 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::mpsc::{Receiver as MpscReceiver, Sender as MpscSender},
-    task::{self, JoinHandle},
+    sync::mpsc::Receiver as MpscReceiver,
     time::{self, Instant},
 };
 
-use crate::{Error, ResourceKind, Result};
+use crate::{Error, ResourceKind, Result, metrics};
 
 mod polling;
 
@@ -100,7 +99,7 @@ pub enum Command {
     SendControlResponse(ControlResponse),
     SendMeterReadings(Vec<MirrorMeterReading>),
 
-    /// Sent on initial start or by the retry task.
+    /// Sent on initial start.
     Wake,
 
     SubscribeToResource {
@@ -156,7 +155,6 @@ pub struct Sep2ConnectionArgs {
 pub async fn task(
     output_ch: BroadcastSender<Sep2ResourceEvent>,
     mut input_ch: MpscReceiver<Command>,
-    input_ch_tx: MpscSender<Command>,
     args: Sep2ConnectionArgs,
 ) -> Result<()> {
     // Various resources we only need to lookup once.
@@ -168,6 +166,7 @@ pub async fn task(
 
     const POST_RATE_GENERIC: Duration = Duration::from_secs(60);
     const POST_RATE_CAPABILITIES: Duration = Duration::from_hours(24);
+    const HEARTBEAT_PERIOD: Duration = Duration::from_mins(15);
     // Queues for messages that we need to send or retry.
     // The choice of 30 is intended to be larger than the SEP2 maximum number of
     // controls of 24 with a bit of extra leeway. In practical usage this should
@@ -188,116 +187,119 @@ pub async fn task(
     let mut mirror_usage_point = None;
     let mut reading_mrid_cache = HashMap::new();
 
-    let mut retry_task_handle: Option<JoinHandle<_>> = None;
-    let mut retry_requested: bool = false;
+    let mut retry_backoff = new_retry_backoff();
+    let mut next_retry_attempt: Option<Instant> = None;
+    let mut last_heartbeat: Option<Instant> = None;
 
     // A workaround for sep2_client so we avoid setting up polls on the same URI
     // multiple times.
     let mut poll_history = HashSet::new();
 
+    let metrics = metrics::metrics();
+
     loop {
-        // Spawn a retry task if needed.
-        if retry_requested {
-            if retry_task_handle.is_none() {
-                retry_task_handle = Some(task::spawn(retry_task(input_ch_tx.clone())));
-            }
-        } else {
-            if let Some(handle) = retry_task_handle.take() {
-                handle.abort();
-                if let Err(join_error) = handle.await
-                    && !join_error.is_cancelled()
-                {
-                    log::warn!("Joining retry task returned an error: {join_error}.");
-                }
-            }
-        }
+        // Wait for a command or a retry/heartbeat timer. The retry delay is
+        // preferred over a heartbeat.
+        let heartbeat_time = last_heartbeat.map_or(Instant::now(), |time| time + HEARTBEAT_PERIOD);
+        let wakeup_time = next_retry_attempt.unwrap_or(heartbeat_time);
 
-        let Some(command) = input_ch.recv().await else {
-            break;
-        };
+        match time::timeout_at(wakeup_time, input_ch.recv()).await {
+            Err(_) => {}
+            // A failure in the channel, exit the task.
+            Ok(None) => break,
+            Ok(Some(command)) => match command {
+                Command::SubscribeToResource {
+                    href,
+                    kind,
+                    poll_rate,
+                } => {
+                    if poll_history.contains(&href) {
+                        log::debug!("Not setting up poll for {href}, already polling this URI.");
+                        continue;
+                    }
 
-        let is_wake_command = matches!(command, Command::Wake);
+                    start_poll_for(
+                        kind,
+                        args.client.clone(),
+                        &href,
+                        poll_rate.unwrap_or(args.default_poll_rate),
+                        args.max_list_size,
+                        output_ch.clone(),
+                    )
+                    .await;
 
-        match command {
-            Command::SubscribeToResource {
-                href,
-                kind,
-                poll_rate,
-            } => {
-                if poll_history.contains(&href) {
-                    log::debug!("Not setting up poll for {href}, already polling this URI.");
+                    poll_history.insert(href);
+                    // Don't fall through to the main sending tasks.
                     continue;
                 }
-
-                start_poll_for(
-                    kind,
-                    args.client.clone(),
-                    &href,
-                    poll_rate.unwrap_or(args.default_poll_rate),
-                    args.max_list_size,
-                    output_ch.clone(),
-                )
-                .await;
-
-                poll_history.insert(href);
-                // Don't fall through to the main sending tasks.
-                continue;
-            }
-            Command::UnsubscribeFromResource { href } => {
-                log::warn!("TODO: removal of subscriptions ({href})");
-                // Don't fall through to the main sending tasks.
-                continue;
-            }
-            Command::SendDeviceSettings(settings) => {
-                log::trace!("Received device settings");
-                latest_device_settings = Some(settings);
-            }
-            Command::SendDeviceCapability(capabilities) => {
-                log::trace!("Received device capabilities");
-                if Some(&capabilities) != device_capabilities.as_ref() {
-                    device_capabilities = Some(capabilities);
-                    // Reset the last sent as we need to update the server immediately.
-                    last_sent_device_capabilities = None;
+                Command::UnsubscribeFromResource { href } => {
+                    log::warn!("TODO: removal of subscriptions ({href})");
+                    // Don't fall through to the main sending tasks.
+                    continue;
                 }
-            }
-            Command::SendDeviceStatus(status) => {
-                log::trace!("Received device status");
-                latest_device_status = Some(status);
-            }
-            Command::SendMeterReadings(readings) => {
-                log::trace!("Received meter readings");
-                latest_meter_readings = Some(readings);
-            }
-            Command::SendControlResponse(response) => {
-                control_response_queue.push_back(response);
-
-                // Limit the queue size.
-                while control_response_queue.len() >= MAX_RESPONSE_QUEUE_SIZE {
-                    let msg = control_response_queue.pop_front();
-                    log::error!(
-                        "Control response queue grew too large, dropping message: {:?}",
-                        msg
-                    );
+                Command::SendDeviceSettings(settings) => {
+                    log::trace!("Received device settings");
+                    latest_device_settings = Some(settings);
                 }
-            }
-            Command::Wake => {}
+                Command::SendDeviceCapability(capabilities) => {
+                    log::trace!("Received device capabilities");
+                    if Some(&capabilities) != device_capabilities.as_ref() {
+                        device_capabilities = Some(capabilities);
+                        // Reset the last sent as we need to update the server immediately.
+                        last_sent_device_capabilities = None;
+                    }
+                }
+                Command::SendDeviceStatus(status) => {
+                    log::trace!("Received device status");
+                    latest_device_status = Some(status);
+                }
+                Command::SendMeterReadings(readings) => {
+                    log::trace!("Received meter readings");
+                    latest_meter_readings = Some(readings);
+                }
+                Command::SendControlResponse(response) => {
+                    control_response_queue.push_back(response);
+
+                    // Limit the queue size.
+                    while control_response_queue.len() >= MAX_RESPONSE_QUEUE_SIZE {
+                        let msg = control_response_queue.pop_front();
+                        log::error!(
+                            "Control response queue grew too large, dropping message: {:?}",
+                            msg
+                        );
+                    }
+                }
+                Command::Wake => {}
+            },
         }
 
-        // If a retry task is running, we shouldn't try sending new messages,
-        // wait until it returns. The only exception is if the retry task woke
-        // up us.
-        if retry_task_handle.is_some() && !is_wake_command {
+        // If we are in retry backoff, we shouldn't try sending new messages,
+        // except if the retry time has passed.
+        if next_retry_attempt.is_some_and(|time| Instant::now() < time) {
             continue;
         }
 
         // At this point we either get to the end of the loop successfully, or
-        // we encounter a problem that requires a retry. Hence we set
-        // retry_requested preemptively.
-        retry_requested = true;
+        // we encounter a problem that requires a retry. Hence we set the next
+        // time-to-retry now and any new failures will take on this time.
+        next_retry_attempt = Some(Instant::now() + retry_backoff.next().unwrap_or_default());
 
         // Ensuring we have a dcap is highest priority.
-        if dcap_option.is_none() {
+        if dcap_option.is_none() || Instant::now() >= heartbeat_time {
+            // Assign dcap_option, which potentially sets it to None on a
+            // failure, causing the loop to continue in the next block.
             dcap_option = get_dcap(args.client.clone(), &args.dcap_uri).await;
+            if dcap_option.is_some() {
+                last_heartbeat = Some(Instant::now());
+            } else {
+                // The DeviceCapability poll is the entrypoint to the SEP2 server
+                // and acts as our heartbeat. If we fail to poll for any reason
+                // (HTTP error, SEP2 server 500 error, malformed response), we
+                // report this as a metric that an operator can use as an alarm.
+                if let Some(metrics) = metrics {
+                    metrics.sep2_heartbeat_failures.inc();
+                }
+            }
         }
         let Some(dcap) = dcap_option.as_ref() else {
             continue;
@@ -481,7 +483,8 @@ pub async fn task(
         }
 
         // If we get to the end, we haven't encountered any errors so don't need to retry
-        retry_requested = false;
+        next_retry_attempt = None;
+        retry_backoff = new_retry_backoff();
     }
 
     log::info!("Input channel closed, stopping SEP2 connection loop");
@@ -639,21 +642,12 @@ async fn ensure_der(client: Client, end_device: &EndDevice, max_list_size: u32) 
     derl_response.der.into_iter().next()
 }
 
-async fn retry_task(input_ch_tx: MpscSender<Command>) {
+fn new_retry_backoff() -> impl Iterator<Item = Duration> {
     // TODO: Make these configurable settings.
-    let mut backoff =
-        Backoff::new(u32::MAX, Duration::from_secs(10), Duration::from_secs(300)).into_iter();
-
-    while let Some(Some(wait_time)) = backoff.next() {
-        log::debug!("Next retry wait duration: {}s", wait_time.as_secs());
-        time::sleep(wait_time).await;
-
-        log::trace!("Waking up main communication task");
-        if input_ch_tx.send(Command::Wake).await.is_err() {
-            log::error!("Retry task encountered closed channel");
-            return;
-        }
-    }
+    let max_retry_interval = Duration::from_secs(300);
+    Backoff::new(u32::MAX, Duration::from_secs(10), max_retry_interval)
+        .into_iter()
+        .map(move |time| time.unwrap_or(max_retry_interval))
 }
 
 /// Attempts to send all control responses that are queued. Returns true if a retry is requested.

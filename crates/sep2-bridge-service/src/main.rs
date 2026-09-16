@@ -281,12 +281,10 @@ async fn main() -> Result<ExitCode> {
     let (sep2_conn_input_tx, sep2_conn_input_rx) = mpsc::channel(10);
     let (sep2_conn_output_tx, sep2_conn_output_rx) = deactivated_broadcast(10);
     let handle = join_set.spawn({
-        let sep2_conn_input_tx = sep2_conn_input_tx.clone();
         async move {
             sep2_connection::task(
                 sep2_conn_output_tx,
                 sep2_conn_input_rx,
-                sep2_conn_input_tx,
                 sep2_connection::Sep2ConnectionArgs {
                     client,
                     dcap_uri: args.dcap_uri,

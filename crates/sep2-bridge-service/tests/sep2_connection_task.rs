@@ -341,12 +341,10 @@ async fn setup() -> (
     let (input_tx, input_rx) = mpsc::channel(10);
     let (output_tx, output_rx) = async_broadcast::broadcast(10);
     let task = task::spawn({
-        let input_tx = input_tx.clone();
         async move {
             sep2_connection::task(
                 output_tx,
                 input_rx,
-                input_tx,
                 sep2_connection::Sep2ConnectionArgs {
                     client,
                     dcap_uri: String::from("/dcap"),
