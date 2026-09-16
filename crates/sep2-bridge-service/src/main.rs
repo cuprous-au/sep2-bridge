@@ -18,7 +18,7 @@ use tokio::{
 use url::Url;
 
 use sep2_bridge::{
-    Error, Result, deactivated_broadcast, dispatch,
+    Error, Result, deactivated_broadcast, dispatch, metrics,
     modbus_connection::{self, Transport as ModbusTransport},
     scheduler, sep2_connection,
 };
@@ -73,6 +73,15 @@ pub struct Args {
     /// The PEN (Private Enterprise Number) used to make mRIDs unique.
     #[clap(env, long, default_value_t = 0)]
     pen: u32,
+
+    /// The optional unix socket endpoint to regularly send metrics to. A form
+    /// unix:///path/to/socket is required.
+    #[clap(env, long, value_parser = parse_metrics_url)]
+    metrics_url: Option<PathBuf>,
+
+    /// How often to send metrics to the metrics endpoint.
+    #[clap(env, long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    metrics_interval_sec: u64,
 }
 
 fn validate_path_exists(input: &str) -> std::result::Result<PathBuf, String> {
@@ -107,7 +116,10 @@ fn parse_modbus_socket(value: &str) -> std::result::Result<ModbusTransport, Stri
                 {
                     Err(String::from("Unexpected parts of URL present."))
                 } else {
-                    Ok(ModbusTransport::Unix(PathBuf::from(url.path())))
+                    Ok(ModbusTransport::Unix(
+                        url.to_file_path()
+                            .map_err(|_| "Unable to extract file path from URL")?,
+                    ))
                 }
             }
             "tcp" => {
@@ -171,6 +183,30 @@ fn load_pin(credentials_path: PathBuf) -> Result<Option<PINType>> {
     .transpose()
 }
 
+fn parse_metrics_url(value: &str) -> std::result::Result<PathBuf, String> {
+    match Url::parse(value) {
+        Err(_) => Err(String::from("Unable to parse URL.")),
+        Ok(url) => match url.scheme() {
+            "unix" => {
+                if url.username() != ""
+                    || url.password().is_some()
+                    || url.fragment().is_some()
+                    || url.host_str().is_some()
+                    || url.port().is_some()
+                    || url.query().is_some()
+                {
+                    Err(String::from("Unexpected parts of URL present."))
+                } else {
+                    Ok(url
+                        .to_file_path()
+                        .map_err(|_| "Unable to extract file path from URL")?)
+                }
+            }
+            scheme => Err(format!("Metrics endpoint scheme {scheme} not supported.")),
+        },
+    }
+}
+
 // Force a relatively quick tickrate for checking on polls. This time has to
 // be shorter than any possible poll rate.
 const POLL_TICKRATE: Duration = Duration::from_secs(5);
@@ -229,6 +265,17 @@ async fn main() -> Result<ExitCode> {
 
     let mut join_set = JoinSet::new();
     let mut task_names = HashMap::new();
+
+    // Start the metrics task if a metrics endpoint has been provided.
+    if let Some(url) = args.metrics_url {
+        let registry = metrics::initialise();
+        let handle = join_set.spawn(metrics::task(
+            registry,
+            Duration::from_secs(args.metrics_interval_sec),
+            url,
+        ));
+        task_names.insert(handle.id(), "metrics_push");
+    }
 
     // Start the SEP2 connection management task.
     let (sep2_conn_input_tx, sep2_conn_input_rx) = mpsc::channel(10);

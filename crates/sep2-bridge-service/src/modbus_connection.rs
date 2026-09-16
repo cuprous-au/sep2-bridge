@@ -27,7 +27,7 @@ use tokio::{
 };
 use tokio_modbus::client::{self, Client, Context};
 
-use crate::{ScaledValue, ScaledValueInner};
+use crate::{ScaledValue, ScaledValueInner, metrics};
 
 #[derive(Clone, Debug, Display)]
 pub enum Error {
@@ -364,6 +364,11 @@ fn comm_err<T: std::error::Error>(err: T) -> Error {
 /// `drop_connection(device_opt.take(), err)`.
 async fn drop_connection(device_opt: Option<AsyncDevice<TokioModbusContext>>, err: Error) {
     log::warn!("Modbus connection issue, dropping connection and retrying: {err}");
+    if device_opt.is_some()
+        && let Some(metrics) = metrics::metrics()
+    {
+        metrics.modbus_connection_drops.inc();
+    }
     // Gracefully drop the connection just in case.
     if let Some(device) = device_opt {
         let _ = device.client.lock().await.disconnect().await;

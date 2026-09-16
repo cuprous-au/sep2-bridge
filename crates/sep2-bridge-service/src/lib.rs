@@ -1,6 +1,7 @@
 use derive_more::Display;
 
 pub mod dispatch;
+pub mod metrics;
 pub mod modbus_connection;
 mod scaled_value;
 pub mod scheduler;
