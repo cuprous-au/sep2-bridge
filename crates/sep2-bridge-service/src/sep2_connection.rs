@@ -5,7 +5,7 @@ use sep2_client::{
     device::SEDevice,
 };
 use sep2_common::{
-    mrid_gen,
+    Pen, mrid_gen,
     packages::{
         dcap::DeviceCapability,
         der::{
@@ -144,7 +144,7 @@ pub struct Sep2ConnectionArgs {
     pub default_poll_rate: u32,
     pub device_to_register: SEDevice,
     pub expected_pin: Option<PINType>,
-    pub pen: u32,
+    pub pen: Pen,
 }
 
 /// Manages communication to and from the SEP2 server.
