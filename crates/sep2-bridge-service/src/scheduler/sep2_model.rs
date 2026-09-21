@@ -155,9 +155,8 @@ impl Sep2Model {
 
         let resource_links_after = self.resource_links();
 
-        // TODO: Go through all of our resources and any that don't exist in the
-        // resource_links_after are orphaned and should be removed from the
-        // model. This is GH issue #20.
+        // Remove any resources that are no longer referenced by the model.
+        self.drop_untracked_resources(&resource_links_after);
 
         // Announce changes to the set of polled resources first, followed by
         // any control responses.
@@ -460,6 +459,56 @@ impl Sep2Model {
 
         // No responses required.
         Vec::new()
+    }
+
+    /// Search through all resources stored by the model and drop any that don't
+    /// appear in resource links. Effectively a garbage collection sweep.
+    fn drop_untracked_resources(self: &mut Sep2Model, resource_links: &ResourceLinks) {
+        // All lists, keyed by href.
+        self.function_set_assignments_lists
+            .retain(|key, _| resource_links.contains_key(key));
+        self.program_lists
+            .retain(|key, _| resource_links.contains_key(key));
+        self.control_lists
+            .retain(|key, _| resource_links.contains_key(key));
+        self.curve_lists
+            .retain(|key, _| resource_links.contains_key(key));
+        // Note: we don't attempt to clear the end device list. It will be
+        // overridden whenever a change occurs anyway.
+
+        // All entities, keyed by mrid, but storing their href. Any lacking a
+        // href are dropped.
+        self.end_devices.retain(|_, val| {
+            val.href
+                .as_ref()
+                .is_some_and(|href| resource_links.contains_key(href))
+        });
+        self.function_set_assignments.retain(|_, val| {
+            val.href
+                .as_ref()
+                .is_some_and(|href| resource_links.contains_key(href))
+        });
+        self.programs.retain(|_, val| {
+            val.href
+                .as_ref()
+                .is_some_and(|href| resource_links.contains_key(href))
+        });
+        self.controls.retain(|_, val| {
+            val.der_control
+                .href
+                .as_ref()
+                .is_some_and(|href| resource_links.contains_key(href))
+        });
+        self.curves.retain(|_, val| {
+            val.href
+                .as_ref()
+                .is_some_and(|href| resource_links.contains_key(href))
+        });
+        self.default_controls.retain(|_, val| {
+            val.href
+                .as_ref()
+                .is_some_and(|href| resource_links.contains_key(href))
+        });
     }
 
     /// Compares the resources needed by the model against a prior set,
@@ -821,11 +870,12 @@ mod tests {
     use std::str::FromStr;
 
     use sep2_common::packages::{
+        der::CurveData,
         edev::EndDeviceList,
         identification::{Link, ListLink},
         objects::EventStatus,
-        primitives::Uint16,
-        types::{DateTimeInterval, SFDIType},
+        primitives::{Int32, Uint16},
+        types::{DateTimeInterval, PowerOfTenMultiplierType, SFDIType},
     };
 
     use super::*;
@@ -847,6 +897,7 @@ mod tests {
     #[test]
     fn add_multiple_controls() {
         let mut model = Sep2Model::default();
+        setup_model_with_mocks(&mut model);
 
         let mrid1 = MRIDType(42);
         let mrid2 = MRIDType(56);
@@ -855,10 +906,12 @@ mod tests {
             der_control: vec![
                 DERControl {
                     mrid: mrid1,
+                    href: Some(String::from("/edev/1/derp/1/derc/1")),
                     ..Default::default()
                 },
                 DERControl {
                     mrid: mrid2,
+                    href: Some(String::from("/edev/1/derp/1/derc/2")),
                     ..Default::default()
                 },
             ],
@@ -914,6 +967,7 @@ mod tests {
     #[test]
     fn cancelling_a_control_emits_event() {
         let mut model = Sep2Model::default();
+        setup_model_with_mocks(&mut model);
         // Add initial control
         model.apply_update(
             mock_derc_list(vec![mock_control_with_status(EventStatusType::Scheduled)]).into(),
@@ -932,6 +986,7 @@ mod tests {
     #[test]
     fn superseding_a_control_emits_event() {
         let mut model = Sep2Model::default();
+        setup_model_with_mocks(&mut model);
         // Add initial control
         model.apply_update(
             mock_derc_list(vec![mock_control_with_status(EventStatusType::Scheduled)]).into(),
@@ -978,8 +1033,11 @@ mod tests {
         let mut model = Sep2Model::default();
         setup_model_with_mocks(&mut model);
 
+        // Children in alphabetical order of href, as this is how they will be retrieved in the BTreeMap.
         let children = [
+            ("/dc/1", ResourceKind::DERCurve),
             ("/edev/1/derp/1", ResourceKind::DERProgram),
+            ("/edev/1/derp/1/dc", ResourceKind::DERCurveList),
             ("/edev/1/derp/1/dderc", ResourceKind::DefaultDERControl),
             ("/edev/1/derp/1/derc", ResourceKind::DERControlList),
             ("/edev/1/derp/1/derc/1", ResourceKind::DERControl),
@@ -1136,6 +1194,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn entities_are_garbage_collected() {
+        // Setup a model and add a set of mocks.
+        let mut model = Sep2Model::default();
+
+        setup_model_with_mocks(&mut model);
+
+        // We should expect to find a bunch of items in the collections.
+        assert!(!model.function_set_assignments_lists.is_empty());
+        assert!(!model.program_lists.is_empty());
+        assert!(!model.control_lists.is_empty());
+        assert!(!model.curve_lists.is_empty());
+        assert!(!model.end_devices.is_empty());
+        assert!(!model.function_set_assignments.is_empty());
+        assert!(!model.programs.is_empty());
+        assert!(!model.controls.is_empty());
+        assert!(!model.curves.is_empty());
+        assert!(!model.default_controls.is_empty());
+
+        // Now remove any link from the end device to a control by overriding the end device list with no end devices.
+        let mut edevl = mock_edev_list(mock_lfdi(), mock_sfdi());
+        edevl.end_device.clear();
+        edevl.all = Uint32(0);
+        edevl.results = Uint32(0);
+        model.apply_update(edevl.into());
+
+        // We expect all of the resources to be gone from the lists.
+        assert!(model.function_set_assignments_lists.is_empty());
+        assert!(model.program_lists.is_empty());
+        assert!(model.control_lists.is_empty());
+        assert!(model.curve_lists.is_empty());
+        assert!(model.end_devices.is_empty());
+        assert!(model.function_set_assignments.is_empty());
+        assert!(model.programs.is_empty());
+        assert!(model.controls.is_empty());
+        assert!(model.curves.is_empty());
+        assert!(model.default_controls.is_empty());
+    }
+
     fn setup_model_with_mocks(model: &mut Sep2Model) -> Vec<Event> {
         let lfdi = mock_lfdi();
         let sfdi = mock_sfdi();
@@ -1147,6 +1244,7 @@ mod tests {
             .into_iter()
             .chain(model.apply_update(mock_fsa_list().into()))
             .chain(model.apply_update(mock_derp_list().into()))
+            .chain(model.apply_update(mock_curve_list().into()))
             .chain(model.apply_update(mock_derc_list(vec![derc]).into()))
             .chain(model.apply_update(mock_dderc().into()))
             .collect()
@@ -1210,7 +1308,10 @@ mod tests {
                     href: String::from("/edev/1/derp/1/derc"),
                     ..Default::default()
                 }),
-
+                der_curve_list_link: Some(ListLink {
+                    href: String::from("/edev/1/derp/1/dc"),
+                    ..Default::default()
+                }),
                 mrid: MRIDType(123),
 
                 primacy: PrimacyType::NonContractualServiceProvider,
@@ -1221,6 +1322,35 @@ mod tests {
             results: Uint32(1),
 
             ..Default::default()
+        }
+    }
+
+    fn mock_curve_list() -> DERCurveList {
+        DERCurveList {
+            href: Some(String::from("/edev/1/derp/1/dc")),
+            der_curve: vec![DERCurve {
+                href: Some(String::from("/dc/1")),
+                mrid: MRIDType(1001),
+
+                curve_data: vec![
+                    CurveData {
+                        xvalue: Int32(0),
+                        yvalue: Int32(0),
+                        ..Default::default()
+                    },
+                    CurveData {
+                        xvalue: Int32(1),
+                        yvalue: Int32(1),
+                        ..Default::default()
+                    },
+                ],
+                x_multiplier: PowerOfTenMultiplierType::Micro,
+                y_multiplier: PowerOfTenMultiplierType::Micro,
+                ..Default::default()
+            }],
+
+            all: Uint32(1),
+            results: Uint32(1),
         }
     }
 

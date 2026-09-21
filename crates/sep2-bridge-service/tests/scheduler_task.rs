@@ -108,7 +108,7 @@ async fn emits_parameters() {
     let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
 
     // Send all resources
-    for resource in resource_map_no_controls().values() {
+    for resource in resources_in_order(resource_map_no_controls().values()) {
         input_ch
             .send(scheduler::Command::ResourceUpdated(resource.clone()))
             .await
@@ -173,7 +173,7 @@ async fn produces_schedule_on_time() {
     let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
 
     // Send all resources
-    for resource in resource_map_no_controls().values() {
+    for resource in resources_in_order(resource_map_no_controls().values()) {
         input_ch
             .send(scheduler::Command::ResourceUpdated(resource.clone()))
             .await
@@ -476,6 +476,32 @@ fn resource_map_no_controls() -> HashMap<&'static str, Sep2ResourceEvent> {
     );
 
     resource_map
+}
+
+/// When inserting resources into the model, we need to ensure there aren't any
+/// orphaned resources so parents must be applied before children. Otherwise the
+/// model will garbage collect them.
+///
+/// This issue doesn't happen in real operation, because
+/// - a) the resources are discovered in the correct order.
+/// - b) subsequent polling events will rediscover the resources.
+///
+/// It is only for the tests that we need to construct this purposefully.
+fn resources_in_order<'a>(
+    resources: impl Iterator<Item = &'a Sep2ResourceEvent>,
+) -> Vec<&'a Sep2ResourceEvent> {
+    let mut ordered: Vec<&'a Sep2ResourceEvent> = resources.collect();
+    ordered.sort_by_key(|resource| match resource {
+        Sep2ResourceEvent::Time(_) => 1,
+        Sep2ResourceEvent::EndDeviceList(_) => 1,
+        Sep2ResourceEvent::FunctionSetAssignmentsList(_) => 2,
+        Sep2ResourceEvent::DERProgramList(_) => 3,
+        Sep2ResourceEvent::DefaultDERControl(_) => 4,
+        Sep2ResourceEvent::DERControlList(_) => 4,
+        Sep2ResourceEvent::DERCurveList(_) => 4,
+    });
+
+    ordered
 }
 
 /// Receives events until one satisfying `predicate` arrives, discarding those
