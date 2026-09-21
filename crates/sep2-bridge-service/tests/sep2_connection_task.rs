@@ -4,12 +4,15 @@ use std::{str::FromStr, time::Duration};
 use chrono::Utc;
 use sep2_bridge::{Result, sep2_connection};
 use sep2_client::{client::Client, device::SEDevice};
-use sep2_common::packages::{
-    der::{ActivePower, DERCapability},
-    metering::ReadingType,
-    metering_mirror::MirrorMeterReading,
-    primitives::{HexBinary160, Int16},
-    types::{DeviceCategoryType, PowerOfTenMultiplierType, SFDIType, UomType},
+use sep2_common::{
+    Pen,
+    packages::{
+        der::{ActivePower, DERCapability},
+        metering::ReadingType,
+        metering_mirror::MirrorMeterReading,
+        primitives::{HexBinary160, Int16},
+        types::{DeviceCategoryType, PowerOfTenMultiplierType, SFDIType, UomType},
+    },
 };
 use tokio::{
     sync::mpsc,
@@ -354,7 +357,7 @@ async fn setup() -> (
                     default_poll_rate: 1,
                     device_to_register: device,
                     expected_pin: None,
-                    pen: 42,
+                    pen: Pen::csipaus(42).expect("valid pen"),
                 },
             )
             .await

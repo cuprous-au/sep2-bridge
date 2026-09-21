@@ -1704,7 +1704,7 @@ dependencies = [
 [[package]]
 name = "sep2_client"
 version = "0.1.0"
-source = "git+https://github.com/ethanndickson/sep2_client.git?rev=cc86179b013517d0681130d1f7adc605aca2b95d#cc86179b013517d0681130d1f7adc605aca2b95d"
+source = "git+https://github.com/ethanndickson/sep2_client.git?rev=2056996509072631a07fad3b6ada56a7676a2b87#2056996509072631a07fad3b6ada56a7676a2b87"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1723,8 +1723,8 @@ dependencies = [
 
 [[package]]
 name = "sep2_common"
-version = "0.1.0"
-source = "git+https://github.com/ethanndickson/sep2_common.git?rev=c87adacf1fd6922f545475ddc60fdf6b1d3bf8f0#c87adacf1fd6922f545475ddc60fdf6b1d3bf8f0"
+version = "0.2.0"
+source = "git+https://github.com/ethanndickson/sep2_common.git?rev=7f083fb1b2de43af614c50b57de0cfb6743017a6#7f083fb1b2de43af614c50b57de0cfb6743017a6"
 dependencies = [
  "anyhow",
  "bitflags 2.13.1",

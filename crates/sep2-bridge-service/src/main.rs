@@ -1,7 +1,10 @@
 use clap::Parser;
 use git_version::git_version;
 use sep2_client::{client::Client, device::SEDevice};
-use sep2_common::packages::types::{DeviceCategoryType, PINType};
+use sep2_common::{
+    Pen,
+    packages::types::{DeviceCategoryType, PINType},
+};
 use std::{
     collections::HashMap,
     fs,
@@ -71,8 +74,8 @@ pub struct Args {
     modbus_socket: ModbusTransport,
 
     /// The PEN (Private Enterprise Number) used to make mRIDs unique.
-    #[clap(env, long, default_value_t = 0)]
-    pen: u32,
+    #[clap(env, long, default_value = "0", value_parser = parse_pen)]
+    pen: Pen,
 
     /// The optional unix socket endpoint to regularly send metrics to. A form
     /// unix:///path/to/socket is required.
@@ -205,6 +208,15 @@ fn parse_metrics_url(value: &str) -> std::result::Result<PathBuf, String> {
             scheme => Err(format!("Metrics endpoint scheme {scheme} not supported.")),
         },
     }
+}
+
+fn parse_pen(value: &str) -> std::result::Result<Pen, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| "PEN is not a valid u32".into())
+        .and_then(|val| {
+            Pen::csipaus(val).ok_or("PEN is not the right size for CSIP-AUS format".into())
+        })
 }
 
 // Force a relatively quick tickrate for checking on polls. This time has to
