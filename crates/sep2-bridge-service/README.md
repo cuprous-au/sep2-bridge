@@ -1,6 +1,10 @@
 sep2-bridge-service
 ===
 
+The bridge service itself. For what it does, how to build it and how to run it, see
+the [top-level README](../../README.md). This file covers the crate's alignment with
+AS5438 and how to set up a local CSIP-AUS server to develop against.
+
 ## Alignment with AS5438
 
 This crate is strongly motivated by the draft spec of AS5438 and is aimed at
