@@ -26,7 +26,7 @@ use sep2_common::{
 };
 use std::hash::{Hash, Hasher};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::Arc,
     time::Duration,
 };
@@ -40,7 +40,7 @@ use crate::{Error, ResourceKind, Result};
 
 mod polling;
 
-use polling::{paginated_uri, start_poll_for};
+use polling::{EstablishedPoll, paginated_uri, start_poll_for};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -191,9 +191,9 @@ pub async fn task(
     let mut retry_task_handle: Option<JoinHandle<_>> = None;
     let mut retry_requested: bool = false;
 
-    // A workaround for sep2_client so we avoid setting up polls on the same URI
-    // multiple times.
-    let mut poll_history = HashSet::new();
+    // The polls set up with sep2_client, keyed by href, so that they can be
+    // updated or cancelled later and aren't set up twice.
+    let mut established_polls: HashMap<String, EstablishedPoll> = HashMap::new();
 
     loop {
         // Spawn a retry task if needed.
@@ -224,27 +224,51 @@ pub async fn task(
                 kind,
                 poll_rate,
             } => {
-                if poll_history.contains(&href) {
-                    log::debug!("Not setting up poll for {href}, already polling this URI.");
+                // The scheduler always sends the poll rate that applies to the
+                // resource, where None means the default applies.
+                let poll_rate = poll_rate.unwrap_or(args.default_poll_rate);
+
+                if let Some(established_poll) = established_polls.get_mut(&href) {
+                    if established_poll.poll_rate != poll_rate {
+                        log::debug!(
+                            "Updating poll rate for {href} from {}s to {}s.",
+                            established_poll.poll_rate,
+                            poll_rate
+                        );
+                        established_poll
+                            .handle
+                            .update_poll_rate(Uint32(poll_rate))
+                            .await;
+                        established_poll.poll_rate = poll_rate;
+                    } else {
+                        log::debug!("Not setting up poll for {href}, already polling this URI.");
+                    }
                     continue;
                 }
 
-                start_poll_for(
+                let poll = start_poll_for(
                     kind,
                     args.client.clone(),
                     &href,
-                    poll_rate.unwrap_or(args.default_poll_rate),
+                    poll_rate,
                     args.max_list_size,
                     output_ch.clone(),
                 )
                 .await;
 
-                poll_history.insert(href);
+                if let Some(poll) = poll {
+                    log::debug!("Started poll for {href} every {poll_rate}s.");
+                    established_polls.insert(href, poll);
+                }
                 // Don't fall through to the main sending tasks.
                 continue;
             }
             Command::UnsubscribeFromResource { href } => {
-                log::warn!("TODO: removal of subscriptions ({href})");
+                // Resources we never polled directly have nothing to cancel.
+                if let Some(established_poll) = established_polls.remove(&href) {
+                    log::debug!("Cancelling poll for {href}.");
+                    established_poll.handle.cancel().await;
+                }
                 // Don't fall through to the main sending tasks.
                 continue;
             }
@@ -365,10 +389,9 @@ pub async fn task(
                 args.default_poll_rate,
                 args.max_list_size,
                 output_ch.clone(),
+                &mut established_polls,
             )
             .await;
-            poll_history.insert(edev_link.href.clone());
-            poll_history.insert(tm_link.href.clone());
             setup_root_polling_done = true;
         }
 
@@ -594,8 +617,9 @@ async fn start_root_polling(
     default_poll_rate: u32,
     max_list_size: u32,
     output_ch: BroadcastSender<Sep2ResourceEvent>,
+    established_polls: &mut HashMap<String, EstablishedPoll>,
 ) {
-    start_poll_for(
+    if let Some(poll) = start_poll_for(
         ResourceKind::EndDeviceList,
         client.clone(),
         edev_uri,
@@ -603,8 +627,11 @@ async fn start_root_polling(
         max_list_size,
         output_ch.clone(),
     )
-    .await;
-    start_poll_for(
+    .await
+    {
+        established_polls.insert(edev_uri.into(), poll);
+    }
+    if let Some(poll) = start_poll_for(
         ResourceKind::Time,
         client.clone(),
         tm_uri,
@@ -612,7 +639,10 @@ async fn start_root_polling(
         max_list_size,
         output_ch.clone(),
     )
-    .await;
+    .await
+    {
+        established_polls.insert(tm_uri.into(), poll);
+    }
 }
 
 async fn ensure_der(client: Client, end_device: &EndDevice, max_list_size: u32) -> Option<DER> {

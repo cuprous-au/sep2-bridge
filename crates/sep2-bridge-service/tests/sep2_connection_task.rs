@@ -121,6 +121,115 @@ async fn no_duplicate_polls() {
     assert_eq!(count, 1);
 }
 
+/// Tests cancelling a polling job.
+#[tokio::test]
+async fn polls_can_be_cancelled() {
+    // Setup
+    let (_task, mock, input_ch, mut output_ch) = setup().await;
+
+    // Clear out the first few events
+    time::sleep(FLUSH_TIME).await;
+    clear_channel(&mut output_ch).await;
+
+    // Prepare the FSAL mock
+    setup_fsal_mock(&mock).await;
+
+    // Ask for it to be polled the first time on a 1s period.
+    let poll_request = sep2_connection::Command::SubscribeToResource {
+        href: String::from("/edev/1/fsa"),
+        kind: sep2_bridge::ResourceKind::FunctionSetAssignmentsList,
+        poll_rate: Some(1),
+    };
+    input_ch.send(poll_request).await.expect("Send error");
+    // We expect a resource returned from the initial GET.
+    assert!(matches!(
+        get_event(&mut output_ch).await,
+        sep2_connection::Sep2ResourceEvent::FunctionSetAssignmentsList(_)
+    ));
+
+    // Confirm that the sep2_connection task polls the resource at least once more.
+    assert!(
+        find_event_satisfying(&mut output_ch, Duration::from_secs(3), |ev| matches!(
+            ev,
+            sep2_connection::Sep2ResourceEvent::FunctionSetAssignmentsList(_)
+        ))
+        .await
+        .is_some()
+    );
+
+    // Ask for it to be cancelled.
+    let cancel_request = sep2_connection::Command::UnsubscribeFromResource {
+        href: String::from("/edev/1/fsa"),
+    };
+    input_ch.send(cancel_request).await.expect("Send error");
+
+    // We should not see the resource again in 3s, enough time to guarantee that
+    // normally 2 more polling cycles would have occurred.
+    assert!(
+        find_event_satisfying(&mut output_ch, Duration::from_secs(3), |ev| matches!(
+            ev,
+            sep2_connection::Sep2ResourceEvent::FunctionSetAssignmentsList(_)
+        ))
+        .await
+        .is_none()
+    );
+}
+
+/// Tests updating a polling job's rate to the default polling rate.
+#[tokio::test]
+async fn poll_rate_can_be_updated() {
+    // Setup
+    let (_task, mock, input_ch, mut output_ch) = setup().await;
+
+    // Clear out the first few events
+    time::sleep(FLUSH_TIME).await;
+    clear_channel(&mut output_ch).await;
+
+    // Prepare the FSAL mock
+    setup_fsal_mock(&mock).await;
+
+    // Ask for it to be polled the first time on a longer 30s period.
+    let poll_request = sep2_connection::Command::SubscribeToResource {
+        href: String::from("/edev/1/fsa"),
+        kind: sep2_bridge::ResourceKind::FunctionSetAssignmentsList,
+        poll_rate: Some(30),
+    };
+    input_ch.send(poll_request).await.expect("Send error");
+    // We expect a resource returned from the initial GET.
+    assert!(matches!(
+        get_event(&mut output_ch).await,
+        sep2_connection::Sep2ResourceEvent::FunctionSetAssignmentsList(_)
+    ));
+
+    // Confirm that the sep2_connection task is not polling rapidly.
+    assert!(
+        find_event_satisfying(&mut output_ch, Duration::from_secs(3), |ev| matches!(
+            ev,
+            sep2_connection::Sep2ResourceEvent::FunctionSetAssignmentsList(_)
+        ))
+        .await
+        .is_none()
+    );
+
+    // Ask for its rate to be updated to the default rate (every second).
+    let update_request = sep2_connection::Command::SubscribeToResource {
+        href: String::from("/edev/1/fsa"),
+        kind: sep2_bridge::ResourceKind::FunctionSetAssignmentsList,
+        poll_rate: None,
+    };
+    input_ch.send(update_request).await.expect("Send error");
+
+    // Ensure we now see frequent polls.
+    assert!(
+        find_event_satisfying(&mut output_ch, Duration::from_secs(3), |ev| matches!(
+            ev,
+            sep2_connection::Sep2ResourceEvent::FunctionSetAssignmentsList(_)
+        ))
+        .await
+        .is_some()
+    );
+}
+
 /// Tests the pushing to upstream.
 #[tokio::test]
 async fn sends_capabilities() {
