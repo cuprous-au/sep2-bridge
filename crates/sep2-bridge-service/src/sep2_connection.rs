@@ -36,17 +36,21 @@ use tokio::{
     time::{self, Instant},
 };
 
-use crate::{Error, ResourceKind, Result};
+use crate::{Error, ResourceKind, Result, metrics};
 
 mod polling;
 
 use polling::{EstablishedPoll, paginated_uri, start_poll_for};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the dcap entrypoint is polled. We hardcode this rather than
+/// following the server's pollRate because we use it as a health check.
+const DCAP_POLL_RATE: Duration = Duration::from_secs(60 * 15);
 
 /// Wraps incoming messages from the SEP2 server about resources
 #[derive(Clone, Debug)]
 pub enum Sep2ResourceEvent {
+    DeviceCapability(Arc<DeviceCapability>),
     Time(Arc<Time>),
     EndDeviceList(Arc<EndDeviceList>),
     FunctionSetAssignmentsList(Arc<FunctionSetAssignmentsList>),
@@ -56,6 +60,11 @@ pub enum Sep2ResourceEvent {
     DERCurveList(Arc<DERCurveList>),
 }
 
+impl From<DeviceCapability> for Sep2ResourceEvent {
+    fn from(resource: DeviceCapability) -> Self {
+        Sep2ResourceEvent::DeviceCapability(Arc::new(resource))
+    }
+}
 impl From<EndDeviceList> for Sep2ResourceEvent {
     fn from(resource: EndDeviceList) -> Self {
         Sep2ResourceEvent::EndDeviceList(Arc::new(resource))
@@ -99,6 +108,10 @@ pub enum Command {
     SendDeviceSettings(DERSettings),
     SendControlResponse(ControlResponse),
     SendMeterReadings(Vec<MirrorMeterReading>),
+    /// The task should refetch the dcap entrypoint and reregister its device.
+    /// Only sent on a change to the dcap, when we can't be sure the server
+    /// hasn't reset its resources.
+    ResetConnection,
 
     /// Sent on initial start or by the retry task.
     Wake,
@@ -163,7 +176,6 @@ pub async fn task(
     let mut dcap_option = None;
     let mut server_device = None;
     let mut server_registration_info = None;
-    let mut setup_root_polling_done = false;
     let mut der_option = None;
 
     const POST_RATE_GENERIC: Duration = Duration::from_secs(60);
@@ -179,7 +191,6 @@ pub async fn task(
     let mut last_sent_device_settings = None;
     let mut latest_device_status = None;
     let mut last_sent_device_status = None;
-    // Capabilities is a little different, we won't get these often so keep a record of them.
     let mut device_capabilities = None;
     let mut last_sent_device_capabilities = None;
     // Meter readings
@@ -194,6 +205,8 @@ pub async fn task(
     // The polls set up with sep2_client, keyed by href, so that they can be
     // updated or cancelled later and aren't set up twice.
     let mut established_polls: HashMap<String, EstablishedPoll> = HashMap::new();
+    // The dcap poll is a manual task rather than a sep2_client poll.
+    let mut dcap_poll_task: Option<JoinHandle<()>> = None;
 
     loop {
         // Spawn a retry task if needed.
@@ -216,7 +229,7 @@ pub async fn task(
             break;
         };
 
-        let is_wake_command = matches!(command, Command::Wake);
+        let is_wake_command = matches!(command, Command::Wake | Command::ResetConnection);
 
         match command {
             Command::SubscribeToResource {
@@ -304,12 +317,34 @@ pub async fn task(
                     );
                 }
             }
+            Command::ResetConnection => {
+                // Clear out anything that we knew from the last dcap:
+                dcap_option = None;
+                server_device = None;
+                server_registration_info = None;
+                der_option = None;
+                mirror_usage_point = None;
+                reading_mrid_cache.clear();
+                last_sent_device_settings = None;
+                last_sent_device_status = None;
+                last_sent_device_capabilities = None;
+                last_sent_meter_readings = None;
+                // The task will now continue and start from scratch, fetching
+                // the dcap, registering the device, etc...
+
+                // All other resources (including the end device list) are left
+                // alone. These will be reset, refetched and polled by the
+                // scheduler as necessary. If the server has just changed one
+                // href in the chain then there will be little action necessary.
+                // If the server has completely removed all resources, then this
+                // will be noticed by the subsequent poll jobs.
+            }
             Command::Wake => {}
         }
 
         // If a retry task is running, we shouldn't try sending new messages,
-        // wait until it returns. The only exception is if the retry task woke
-        // up us.
+        // wait until it returns. The only exceptions are if the retry task woke
+        // up us or we need to reset our connection.
         if retry_task_handle.is_some() && !is_wake_command {
             continue;
         }
@@ -321,18 +356,44 @@ pub async fn task(
 
         // Ensuring we have a dcap is highest priority.
         if dcap_option.is_none() {
+            // Always stop any previous poll for the dcap. If we successfully
+            // get a new dcap we will be replacing this old poll, if we fail
+            // then we don't want to poll anyway.
+            if let Some(prior_poll) = dcap_poll_task.take() {
+                prior_poll.abort();
+            }
+
             dcap_option = get_dcap(args.client.clone(), &args.dcap_uri).await;
+            // If we got a dcap, share this with the scheduler and setup a watch
+            // for both a healthcheck on the SEP2 reachability and to see if the
+            // main endpoints change.
+            if let Some(dcap) = dcap_option.as_ref() {
+                output_ch
+                    .broadcast(dcap.clone().into())
+                    .await
+                    .map_err(|_| Error::ChannelClosed)?;
+                dcap_poll_task = Some(task::spawn(dcap_polling(
+                    args.client.clone(),
+                    args.dcap_uri.clone(),
+                    dcap.clone(),
+                    output_ch.clone(),
+                    input_ch_tx.clone(),
+                )));
+            } else {
+                // This is not on the heartbeat interval, but still counts as a failure for that purpose.
+                if let Some(metrics) = metrics::metrics() {
+                    metrics.sep2_dcap_failures.inc();
+                }
+            }
         }
         let Some(dcap) = dcap_option.as_ref() else {
             continue;
         };
 
         // Validate the response - if we don't have the appropriate links, then this is not something we can continue with.
-        let (Some(edev_link), Some(tm_link)) =
-            (dcap.end_device_list_link.as_ref(), dcap.time_link.as_ref())
-        else {
+        let Some(edev_link) = dcap.end_device_list_link.as_ref() else {
             log::error!(
-                "dcap response doesn't have all expected links. We will retry and refetch the dcap endpoint."
+                "dcap response doesn't have the expected edev_link. We will retry and refetch the dcap endpoint."
             );
             dcap_option = None;
             continue;
@@ -376,23 +437,6 @@ pub async fn task(
                 log::error!("Server device PIN doesn't match expected PIN.");
                 continue;
             }
-        }
-
-        // Ensure the root polling is setup.
-        if !setup_root_polling_done {
-            // Setup polls for edev list and time link. All other polls will be created
-            // after receiving these responses.
-            start_root_polling(
-                args.client.clone(),
-                &edev_link.href,
-                &tm_link.href,
-                args.default_poll_rate,
-                args.max_list_size,
-                output_ch.clone(),
-                &mut established_polls,
-            )
-            .await;
-            setup_root_polling_done = true;
         }
 
         // If there are updates in the status update queue, try and send them out.
@@ -609,39 +653,53 @@ async fn register_new_device(
     Ok(new_device)
 }
 
-/// Setup the polls we need for all other resources to be discovered.
-async fn start_root_polling(
+/// Polls the dcap entrypoint. This is both a healthcheck on the SEP2 server's
+/// reachability and a watch for any changes to the hrefs we care about.
+///
+/// We run this poll manually so that we can report on failures.
+async fn dcap_polling(
     client: Client,
-    edev_uri: &str,
-    tm_uri: &str,
-    default_poll_rate: u32,
-    max_list_size: u32,
-    output_ch: BroadcastSender<Sep2ResourceEvent>,
-    established_polls: &mut HashMap<String, EstablishedPoll>,
+    dcap_uri: String,
+    known_dcap: DeviceCapability,
+    broadcast: BroadcastSender<Sep2ResourceEvent>,
+    input_ch_tx: MpscSender<Command>,
 ) {
-    if let Some(poll) = start_poll_for(
-        ResourceKind::EndDeviceList,
-        client.clone(),
-        edev_uri,
-        default_poll_rate,
-        max_list_size,
-        output_ch.clone(),
-    )
-    .await
-    {
-        established_polls.insert(edev_uri.into(), poll);
-    }
-    if let Some(poll) = start_poll_for(
-        ResourceKind::Time,
-        client.clone(),
-        tm_uri,
-        default_poll_rate,
-        max_list_size,
-        output_ch.clone(),
-    )
-    .await
-    {
-        established_polls.insert(tm_uri.into(), poll);
+    let metrics = metrics::metrics();
+    loop {
+        // Poll loosely (don't worry about being exact here)
+        time::sleep(DCAP_POLL_RATE).await;
+
+        let result =
+            match time::timeout(HTTP_TIMEOUT, client.get::<DeviceCapability>(&dcap_uri)).await {
+                Ok(Ok(dcap)) => Ok(dcap),
+                Ok(Err(err)) => Err(err.to_string()),
+                Err(_) => Err(format!("timed out after {}s", HTTP_TIMEOUT.as_secs())),
+            };
+
+        let dcap = match result {
+            Ok(dcap) => dcap,
+            Err(reason) => {
+                log::warn!("Heartbeat check of dcap at {dcap_uri} failed: {reason}.");
+                if let Some(metrics) = metrics {
+                    metrics.sep2_dcap_failures.inc();
+                }
+                continue;
+            }
+        };
+
+        // Always emit this as an event, in the same fashion as the other polls.
+        let _ = broadcast.broadcast(dcap.clone().into()).await;
+
+        // Only if the data has changed do we inform the main task that we
+        // need to reset as we can't trust any new data.
+        //
+        // We could be more specific in this comparison, but in the event
+        // that something changes which we don't care about, a connection
+        // reset is cheap: existing polls will not be interrupted.
+        if known_dcap != dcap {
+            let _ = input_ch_tx.send(Command::ResetConnection).await;
+            // The main task will handle aborting this task.
+        }
     }
 }
 

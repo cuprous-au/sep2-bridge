@@ -63,6 +63,7 @@ Note that TLS will not work out of the box on a current OpenSSL — see
 | `--pen`                   | `0`                       | Private Enterprise Number, used to make generated mRIDs unique                                            |
 | `--metrics-url`           | None                      | If given, a unix socket path to push metrics (`unix:///path/to.sock`) |
 | `--metrics-interval-sec`  | `60`                      | How often to push metrics to the metrics URL |
+| `--persistence-path`      | `""`                      | Where to persist and restore scheduler state. An empty string disables persistence. |
 
 ## Credentials and TLS
 
