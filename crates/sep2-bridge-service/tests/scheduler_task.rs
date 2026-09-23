@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -31,7 +32,7 @@ const TIMEOUT: Duration = Duration::from_millis(200);
 async fn requests_polling() {
     // This test mocks the sep2_connection task by responding with a resource if a poll is requested.
 
-    let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
+    let (_task, input_ch, mut output_ch) = prepare_scheduler_task(None).await;
 
     // Fill map of responses for hrefs.
     let resource_map = resource_map_no_controls();
@@ -105,7 +106,7 @@ async fn requests_polling() {
 /// Tests whether the scheduler produces a relevant set of parameters that indicate the current desired state of the device.
 #[tokio::test]
 async fn emits_parameters() {
-    let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
+    let (_task, input_ch, mut output_ch) = prepare_scheduler_task(None).await;
 
     // Send all resources
     for resource in resources_in_order(resource_map_no_controls().values()) {
@@ -170,7 +171,7 @@ async fn emits_parameters() {
 #[tokio::test]
 async fn produces_schedule_on_time() {
     // Set up resources for scheduler without a control
-    let (_task, input_ch, mut output_ch) = prepare_scheduler_task().await;
+    let (_task, input_ch, mut output_ch) = prepare_scheduler_task(None).await;
 
     // Send all resources
     for resource in resources_in_order(resource_map_no_controls().values()) {
@@ -311,6 +312,55 @@ async fn produces_schedule_on_time() {
     assert!(actual_end_time >= (end_time - tolerance) && actual_end_time <= (end_time + tolerance));
 }
 
+/// Tests that a scheduler can persist and restore state and announces all of
+/// the resources when restoring.
+#[tokio::test]
+async fn restores_persisted_state() {
+    let path = std::env::temp_dir().join(format!("sep2-bridge-test-{}.json", std::process::id()));
+
+    // Build up and persist state in a first scheduler task.
+    let (task, input_ch, mut output_ch) = prepare_scheduler_task(Some(path.clone())).await;
+    let resource_map = resource_map_no_controls();
+    for resource in resources_in_order(resource_map.values()) {
+        input_ch
+            .send(scheduler::Command::ResourceUpdated(resource.clone()))
+            .await
+            .expect("Send failure");
+    }
+    // Build up a map of all resources by their hrefs
+    let events = collect_all(&mut output_ch).await;
+    let links_before: HashSet<String> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            scheduler::Event::LinkAddedOrUpdated { href, .. } => Some(href),
+            _ => None,
+        })
+        .collect();
+
+    // Stop the scheduler.
+    task.abort();
+    let _ = task.await;
+
+    // Start a second scheduler to restore state from the same path.
+    let (_task, input_ch, mut output_ch) = prepare_scheduler_task(Some(path.clone())).await;
+    input_ch
+        .send(scheduler::Command::RefreshActiveResources)
+        .await
+        .expect("Send failure");
+    let events = collect_all(&mut output_ch).await;
+    let links_after: HashSet<String> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            scheduler::Event::LinkAddedOrUpdated { href, .. } => Some(href),
+            _ => None,
+        })
+        .collect();
+
+    std::fs::remove_file(&path).expect("persistence file");
+    assert!(!links_before.is_empty());
+    assert_eq!(links_after, links_before);
+}
+
 /////
 // Helpers
 
@@ -318,7 +368,9 @@ fn mock_lfdi() -> HexBinary160 {
     HexBinary160::from_str("00112233").expect("Invalid LFDI in test")
 }
 
-async fn prepare_scheduler_task() -> (
+async fn prepare_scheduler_task(
+    persistence_path: Option<PathBuf>,
+) -> (
     JoinHandle<Result<()>>,
     mpsc::Sender<scheduler::Command>,
     async_broadcast::Receiver<scheduler::Event>,
@@ -331,6 +383,7 @@ async fn prepare_scheduler_task() -> (
         scheduler_input_rx,
         scheduler_input_tx.clone(),
         mock_lfdi(),
+        persistence_path,
     ));
 
     (task, scheduler_input_tx, scheduler_output_rx)
@@ -492,6 +545,7 @@ fn resources_in_order<'a>(
 ) -> Vec<&'a Sep2ResourceEvent> {
     let mut ordered: Vec<&'a Sep2ResourceEvent> = resources.collect();
     ordered.sort_by_key(|resource| match resource {
+        Sep2ResourceEvent::DeviceCapability(_) => 0,
         Sep2ResourceEvent::Time(_) => 1,
         Sep2ResourceEvent::EndDeviceList(_) => 1,
         Sep2ResourceEvent::FunctionSetAssignmentsList(_) => 2,
@@ -541,5 +595,16 @@ async fn collect_n_events<T: Clone>(
         events.push(event);
     }
 
+    events
+}
+
+async fn collect_all(
+    output_ch: &mut async_broadcast::Receiver<scheduler::Event>,
+) -> Vec<scheduler::Event> {
+    let mut events = Vec::new();
+    while let Ok(event) = time::timeout(TIMEOUT, output_ch.recv()).await {
+        let event = event.expect("Recv failure");
+        events.push(event)
+    }
     events
 }

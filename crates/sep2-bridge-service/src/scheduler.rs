@@ -5,7 +5,14 @@ use sep2_common::packages::{
     primitives::{HexBinary160, Int64, Uint32},
     types::MRIDType,
 };
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::{
+    ffi::{OsStr, OsString},
+    fs::{self, File},
+    io::BufWriter,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 
 use crate::{Error, ResourceKind, Result, sep2_connection::Sep2ResourceEvent};
@@ -22,6 +29,9 @@ pub enum Command {
 
     /// Apply a new incoming resource definition into the model.
     ResourceUpdated(Sep2ResourceEvent),
+
+    /// Request all known resources and their poll rate to be emitted as events.
+    RefreshActiveResources,
 }
 
 /// Events emitted when changes made to the model require external effects.
@@ -62,9 +72,10 @@ pub async fn task(
     mut input_ch: mpsc::Receiver<Command>,
     input_ch_tx: mpsc::Sender<Command>,
     device_lfdi: HexBinary160,
+    persistence_path: Option<PathBuf>,
 ) -> Result<()> {
     // Initialisation
-    let mut model = load_persisted_state();
+    let mut model = load_persisted_state(persistence_path.as_deref());
     let mut wait_task: Option<JoinHandle<_>> = None;
     let mut prior_next_events = Vec::new();
     let mut prior_next_scheduler_time = None;
@@ -87,7 +98,26 @@ pub async fn task(
                         .await
                         .map_err(|_| Error::ChannelClosed)?;
                 }
+
+                // Persist the new state.
+                if let Some(path) = persistence_path.as_ref() {
+                    log::trace!("Persisting scheduled state to '{}'", path.display());
+                    if let Err(err) = persist_state(&model, path) {
+                        log::error!("Issue persisting scheduler state: {err}");
+                    }
+                }
+
                 // Continue through to scheduling calculations.
+            }
+            Command::RefreshActiveResources => {
+                let events = model.refresh_known_links();
+                log::debug!("Emitting events for {} known resources.", events.len());
+                for event in events {
+                    output_ch
+                        .broadcast(event)
+                        .await
+                        .map_err(|_| Error::ChannelClosed)?;
+                }
             }
         };
 
@@ -162,10 +192,115 @@ pub async fn task(
     Ok(())
 }
 
-fn load_persisted_state() -> Sep2Model {
-    // FIXME: This is currently a stub acting as if there is no persisted state
-    // and using a fresh slate.
-    Sep2Model::default()
+/// A number to track breaking changes in the persistence state. This is to
+/// future proof any changes in persistence, in the currenet version, this is
+/// only used for prevalidation.
+const STATE_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct PersistedState<M> {
+    version: u32,
+    model: M,
+}
+
+/// Just the version of the persistence file, for deserialising only that value.
+#[derive(Deserialize)]
+struct PersistedVersion {
+    version: u32,
+}
+
+fn load_persisted_state(path: Option<&Path>) -> Sep2Model {
+    // Wrapping the internal logic for simpler error handling.
+    match load_persisted_state_inner(path) {
+        Err(err) => {
+            log::error!(
+                "Unable to load persisted state: '{err}'. Continuing with default (empty) state."
+            );
+            Sep2Model::default()
+        }
+        Ok(model) => model,
+    }
+}
+
+fn load_persisted_state_inner(path: Option<&Path>) -> std::result::Result<Sep2Model, String> {
+    // If the user requested not to persist state, load a default:
+    let Some(path) = path else {
+        return Ok(Sep2Model::default());
+    };
+
+    // If the path doesn't exist, this is not an error, we start with default state:
+    if !path.exists() {
+        log::info!(
+            "Initialising scheduler with default state because persistence file '{}' was not found.",
+            path.display()
+        );
+        return Ok(Sep2Model::default());
+    }
+
+    let contents = fs::read_to_string(path)
+        .map_err(|err| format!("Unable to read file '{}': {}", path.display(), err))?;
+
+    // First parse the file for the persistence version.
+    let PersistedVersion { version } = serde_json::from_str(&contents)
+        .map_err(|err| format!("Unable to determine the persisted state version: {err}"))?;
+
+    if version != STATE_VERSION {
+        return Err(format!(
+            "Persisted state is version {version}, when we expected version {STATE_VERSION}"
+        ));
+    }
+
+    // Now load the state properly.
+    let state: PersistedState<Sep2Model> = serde_json::from_str(&contents)
+        .map_err(|err| format!("Unable to parse persisted state: {err}"))?;
+
+    log::info!("Loaded previous scheduler state from '{}'", path.display());
+
+    Ok(state.model)
+}
+
+/// Persists the current model state to `path` using a temporary file
+/// `<dir>/.<file>.tmp` in order to atomically replace any previously stored
+/// state.
+fn persist_state(model: &Sep2Model, path: &Path) -> std::result::Result<(), String> {
+    let dir = path.parent().ok_or(format!(
+        "Unexpectedly found no parent for path '{}'",
+        path.display()
+    ))?;
+
+    // Prepare and write the data to a temporary file.
+    let basename = path
+        .file_name()
+        .ok_or(String::from("No filename found for persistence path"))?;
+    let temp_name: OsString = [OsStr::new("."), basename, OsStr::new(".tmp")]
+        .into_iter()
+        .collect();
+    let temp_path = dir.join(temp_name);
+    let temp_file = File::create(&temp_path).map_err(|err| {
+        format!("Cannot create temporary file for writing persistence data: {err}")
+    })?;
+    let mut writer = BufWriter::new(temp_file);
+    let state = PersistedState {
+        version: STATE_VERSION,
+        model,
+    };
+    serde_json::to_writer(&mut writer, &state)
+        .map_err(|err| format!("Failed to write to persistence file: {err}"))?;
+
+    // We extract the temp_file back out from the writer, as when BufWriter is
+    // dropped, it would attempt to flush and silently ignore any errors doing so.
+    // Instead we flush explicitly via into_inner() to receive those errors.
+    writer
+        .into_inner()
+        .map_err(|err| format!("Unable to flush serialised data to file: {err}"))?
+        .sync_all()
+        .map_err(|err| format!("Unable to sync file data to disk: {err}"))?;
+
+    // Atomically replace the stored state.
+    fs::rename(&temp_path, path)
+        .map_err(|err| format!("Unable to move persistence data to location: {err}"))?;
+
+    Ok(())
 }
 
 /// Determine the new parameters given a time `now`.
@@ -543,9 +678,6 @@ mod tests {
         );
         assert_eq!(parameters.num_active(), 4);
     }
-
-    #[test]
-    fn parameters_combines_controls() {}
 
     struct MockControls {
         controls: Vec<ScheduledControl>,

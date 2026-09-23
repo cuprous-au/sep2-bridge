@@ -85,6 +85,11 @@ pub struct Args {
     /// How often to send metrics to the metrics endpoint.
     #[clap(env, long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     metrics_interval_sec: u64,
+
+    /// A path to persist and restore scheduler state. Pass an empty string to disable persistence.
+    #[clap(env, long, default_value = "", value_parser = parse_persistence_path)]
+    // Note the full path std::option::Option is to prevent clap giving the Option special treatment.
+    persistence_path: std::option::Option<PathBuf>,
 }
 
 fn validate_path_exists(input: &str) -> std::result::Result<PathBuf, String> {
@@ -219,6 +224,34 @@ fn parse_pen(value: &str) -> std::result::Result<Pen, String> {
         })
 }
 
+fn parse_persistence_path(value: &str) -> std::result::Result<Option<PathBuf>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let path = PathBuf::from(value);
+    if path.is_dir() {
+        return Err(format!(
+            "The path '{}' is a directory, expected a file instead.",
+            path.display()
+        ));
+    }
+
+    // We aren't going to create directories, so first ensure the parent exists.
+    let parent = path
+        .parent()
+        .ok_or(format!("Path has no parent: '{}'", path.display()))?;
+    // A relative filename without any path has the current directory as its
+    // parent, which is represented by "".
+    if !parent.is_empty() && !parent.exists() {
+        return Err(format!(
+            "The path '{}' should be a file inside a directory that already exists.",
+            path.display()
+        ));
+    }
+    Ok(Some(path))
+}
+
 // Force a relatively quick tickrate for checking on polls. This time has to
 // be shorter than any possible poll rate.
 const POLL_TICKRATE: Duration = Duration::from_secs(5);
@@ -322,6 +355,7 @@ async fn main() -> Result<ExitCode> {
         scheduler_input_rx,
         scheduler_input_tx.clone(),
         lfdi,
+        args.persistence_path,
     ));
     task_names.insert(handle.id(), "scheduler");
 
@@ -374,8 +408,9 @@ async fn main() -> Result<ExitCode> {
         .send(sep2_connection::Command::Wake)
         .await
         .map_err(|_| Error::ChannelClosed)?;
+    // The wake-up action for the scheduler is to emit all known resources.
     scheduler_input_tx
-        .send(scheduler::Command::NextSchedule)
+        .send(scheduler::Command::RefreshActiveResources)
         .await
         .map_err(|_| Error::ChannelClosed)?;
 

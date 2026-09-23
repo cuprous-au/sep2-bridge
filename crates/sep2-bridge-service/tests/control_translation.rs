@@ -611,6 +611,7 @@ async fn setup() -> (
         scheduler_input_rx,
         scheduler_input_tx.clone(),
         lfdi,
+        None,
     ));
 
     // Start the modbus task.
