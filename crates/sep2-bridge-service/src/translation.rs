@@ -66,7 +66,6 @@ pub enum Error {
     MandatoryNone,
     UnmappableInvalid,
     OutOfRange,
-    Unknown,
 }
 
 impl std::error::Error for Error {}
@@ -137,10 +136,7 @@ impl TryFrom<ModbusStatus> for DERStatus {
                 .map_err(|err| err.name("operational_mode_status"))?,
             gen_connect_status: connect_status.clone(),
             stor_connect_status: connect_status,
-            alarm_status: status
-                .alrm
-                .try_convert()
-                .map_err(|err| err.name("alarm_status"))?,
+            alarm_status: status.alrm.convert(),
             state_of_charge_status: status.soc.convert(),
             reading_time: Int64(Utc::now().timestamp()),
             ..Default::default()
@@ -847,17 +843,21 @@ impl TryConvert<ConnectStatusType> for model701::ConnSt {
     }
 }
 
-impl TryConvert<DERAlarmStatus> for model701::Alrm {
-    fn try_convert(self: model701::Alrm) -> ResultUnnamed<DERAlarmStatus> {
+impl Convert<DERAlarmStatus> for model701::Alrm {
+    fn convert(self: model701::Alrm) -> DERAlarmStatus {
         self.iter()
-            .map(|flag| {
+            .filter_map(|flag| {
                 match flag {
-                    model701::Alrm::DcOverVolt => Ok(DERAlarmStatus::DER_FAULT_OVER_VOLTAGE),
-                    model701::Alrm::ManualShutdown => Ok(DERAlarmStatus::DER_FAULT_EMERGENCY_LOCAL),
-                    model701::Alrm::OverFrequency => Ok(DERAlarmStatus::DER_FAULT_OVER_FREQUENCY),
-                    model701::Alrm::UnderFrequency => Ok(DERAlarmStatus::DER_FAULT_UNDER_FREQUENCY),
-                    model701::Alrm::AcOverVolt => Ok(DERAlarmStatus::DER_FAULT_OVER_VOLTAGE),
-                    model701::Alrm::AcUnderVolt => Ok(DERAlarmStatus::DER_FAULT_UNDER_VOLTAGE),
+                    model701::Alrm::DcOverVolt => Some(DERAlarmStatus::DER_FAULT_OVER_VOLTAGE),
+                    model701::Alrm::ManualShutdown => {
+                        Some(DERAlarmStatus::DER_FAULT_EMERGENCY_LOCAL)
+                    }
+                    model701::Alrm::OverFrequency => Some(DERAlarmStatus::DER_FAULT_OVER_FREQUENCY),
+                    model701::Alrm::UnderFrequency => {
+                        Some(DERAlarmStatus::DER_FAULT_UNDER_FREQUENCY)
+                    }
+                    model701::Alrm::AcOverVolt => Some(DERAlarmStatus::DER_FAULT_OVER_VOLTAGE),
+                    model701::Alrm::AcUnderVolt => Some(DERAlarmStatus::DER_FAULT_UNDER_VOLTAGE),
                     model701::Alrm::OverTemp
                     | model701::Alrm::AcDisconnect
                     | model701::Alrm::DcDisconnect
@@ -869,12 +869,11 @@ impl TryConvert<DERAlarmStatus> for model701::Alrm {
                     | model701::Alrm::MemoryLoss
                     | model701::Alrm::HwTestFailure
                     | model701::Alrm::ManufacturerAlrm => {
-                        // TODO how to translate these?
-                        Err(Error::Unknown)
+                        // These alarms don't have a matching alarm in DERAlarmStatus. Ignore them.
+                        None
                     }
-                    // FIXME: why is the enum not exhausted? what are the other flags?
-                    // There are potentially other bits which are unknown to us and need to be handled.
-                    _ => Err(Error::UnmappableInvalid),
+                    // If any other bits are included in the response, ignore these
+                    _ => None,
                 }
             })
             .collect()
