@@ -147,6 +147,19 @@ certificates and other OpenSSL details. You might like to attempt to curl the
 endpoint directly yourself with the client certificates to debug the issue
 further.
 
+## Contribution policy
+
+Contributions via GitHub pull requests are gladly accepted from their original author. Along with any pull requests, please state that the contribution is your original work and that you license the work to the project under the project's open source license. Whether or not you state this explicitly, by submitting any copyrighted material via pull request, email, or other means you agree to license the material under the project's open source license and warrant that you have the legal authority to do so.
+
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+This code is open source software licensed under the [Apache-2.0 license](./LICENSE).
+
+## An AR-PST deliverable
+
+This repository is a deliverable of a research grant with the Australian Research in Power Systems Transition project
+([AR-PST](https://www.csiro.au/en/research/technology-space/energy/electricity-transition/ar-pst));
+specifically Stage 6 which is focused on "behind-the-meter" solutions at residential and commercial sites.
+The AR-PST is a multi-year program to identify strategies for transitioning Australia to a stable, secure, and affordable electricity grid.
+
+&copy; Copyright 2026 Commonwealth Scientific and Industrial Research Organisation (CSIRO)
