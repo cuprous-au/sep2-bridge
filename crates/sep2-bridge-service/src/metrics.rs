@@ -16,6 +16,7 @@ use crate::Result;
 /// Provides all metrics available to modules.
 pub struct Metrics {
     pub modbus_connection_drops: Counter,
+    pub sep2_dcap_failures: Counter,
 }
 
 // Global value for all users to obtain through the metrics() function.
@@ -33,6 +34,7 @@ pub fn metrics() -> Option<&'static Metrics> {
 pub fn initialise() -> Registry {
     let metrics = Metrics {
         modbus_connection_drops: Counter::default(),
+        sep2_dcap_failures: Counter::default(),
     };
 
     let mut registry = Registry::with_prefix("sep2_bridge");
@@ -41,6 +43,12 @@ pub fn initialise() -> Registry {
         "modbus_connection_drops",
         "The number of times an active modbus connection was dropped",
         metrics.modbus_connection_drops.clone(),
+    );
+
+    registry.register(
+        "sep2_dcap_failures",
+        "The number of times a connection to the SEP2 dcap endpoint failed",
+        metrics.sep2_dcap_failures.clone(),
     );
 
     METRICS

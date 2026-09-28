@@ -32,14 +32,10 @@ async fn reads_resources() {
     // Setup
     let (_task, mock, input_ch, mut output_ch) = setup().await;
 
-    // Ensure we get the first few events from the endpoints that are always queried.
+    // Ensure we get the first event from the dcap endpoint that is always queried.
     assert!(matches!(
         get_event(&mut output_ch).await,
-        sep2_connection::Sep2ResourceEvent::EndDeviceList(_)
-    ));
-    assert!(matches!(
-        get_event(&mut output_ch).await,
-        sep2_connection::Sep2ResourceEvent::Time(_)
+        sep2_connection::Sep2ResourceEvent::DeviceCapability(_)
     ));
 
     // Now request a new subscription to FSA:
@@ -434,7 +430,7 @@ async fn setup() -> (
     // The mocked SEP2 server
     let mock = MockServer::start().await;
 
-    // The sep2_connection task will always query the dcap, tm, and edev lists
+    // The sep2_connection task will always query the dcap and edev lists
     // so ensure those are mocked and ready before we start the task, otherwise
     // we'd have to wait for a polling cycle.
     setup_base_mocks(&mock, lfdi, sfdi).await;
@@ -518,17 +514,6 @@ async fn setup_base_mocks(mock: &MockServer, lfdi: HexBinary160, sfdi: SFDIType)
     <RegistrationLink href="/edev/1/rg"/><csipaus:ConnectionPointLink href="/edev/1/cp"/>
   </EndDevice>
 </EndDeviceList>"#))
-        .await;
-
-    mock_get(mock, String::from("/tm"),
-        format!(r#"<Time xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/tm">
-  <currentTime>{now}</currentTime>
-  <dstEndTime>0</dstEndTime>
-  <dstOffset>0</dstOffset>
-  <dstStartTime>0</dstStartTime>
-  <quality>4</quality>
-  <tzOffset>0</tzOffset>
-</Time>"#))
         .await;
 
     mock_get(mock, String::from("/edev/1/der"),

@@ -4,6 +4,7 @@ use chrono::Utc;
 use rand::{RngExt, rngs::ThreadRng};
 use sep2_common::{
     packages::{
+        dcap::DeviceCapability,
         der::{
             DERControl, DERControlList, DERCurve, DERCurveList, DERProgram, DERProgramList,
             DefaultDERControl,
@@ -18,6 +19,12 @@ use sep2_common::{
     },
     traits::{SEList, SEResource},
 };
+use sepserde::{YaDeserialize, YaSerialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{Deserializer, Error as _},
+    ser::{Error as _, Serializer},
+};
 use std::{
     collections::{BTreeMap, HashMap, hash_map::Entry},
     hash::Hash,
@@ -31,13 +38,16 @@ use crate::{ResourceKind, Result, sep2_connection::Sep2ResourceEvent};
 /// A thin wrapper around DERControl which includes a realised interval.
 /// This interval includes randomisation if requested from the server and is
 /// done once to avoid statistical bias.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledControl {
     // The wrapped data
+    #[serde(with = "yaserde")]
     pub der_control: DERControl,
 
     // Realised start/duration of the potentially-randomised interval
+    #[serde(with = "yaserde")]
     pub start_time: Int64,
+    #[serde(with = "yaserde")]
     pub duration: Uint32,
 }
 
@@ -49,10 +59,15 @@ impl ScheduledControl {
 
 /// Contains the ids of all items that are in a SEList, without
 /// storing the rest of the details.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct IDList<T> {
     pub href: String,
+    #[serde(
+        with = "yaserde_vec",
+        bound(serialize = "T: YaSerialize", deserialize = "T: YaDeserialize")
+    )]
     pub items: Vec<T>,
+    #[serde(with = "yaserde_opt")]
     pub poll_rate: Option<Uint32>,
 }
 type MRIDList = IDList<MRIDType>;
@@ -85,8 +100,9 @@ pub enum ControlRef<'a> {
 }
 
 /// The data model built up from multiple requests to the SEP2 server.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sep2Model {
+    #[serde(with = "yaserde")]
     time: Time,
 
     // These are lists which we need only store their children's IDs.
@@ -97,16 +113,26 @@ pub struct Sep2Model {
     // The end device list is special as it is unique and contains LFDIs
     // instead of MRIDs. It is stored along with its href.
     end_device_list: Option<LFDIList>,
+    // The DeviceCapability is the top of the tree. We use it to discover the
+    // links for the edev list and time.
+    #[serde(with = "yaserde_opt")]
+    dcap: Option<DeviceCapability>,
 
     // The individual resource definitions.
     // End devices are keyed by LFDI, as an href may refer to a different
     // device over time.
+    #[serde(with = "yaserde_map_both")]
     end_devices: HashMap<HexBinary160, EndDevice>,
+    #[serde(with = "yaserde_map_both")]
     function_set_assignments: HashMap<MRIDType, FunctionSetAssignments>,
+    #[serde(with = "yaserde_map_both")]
     programs: HashMap<MRIDType, DERProgram>,
+    #[serde(with = "yaserde_map_keys")]
     controls: HashMap<MRIDType, ScheduledControl>,
+    #[serde(with = "yaserde_map_both")]
     curves: HashMap<MRIDType, DERCurve>,
     // Note that default controls are linked by href and not mrid.
+    #[serde(with = "yaserde_map_values")]
     default_controls: HashMap<String, DefaultDERControl>,
 }
 
@@ -129,6 +155,7 @@ impl Sep2Model {
 
         // Collect up any events that require responses to the SEP2 server.
         let control_events = match update {
+            Sep2ResourceEvent::DeviceCapability(dcap) => self.set_dcap(&dcap),
             Sep2ResourceEvent::Time(time) => self.set_time(&time),
             Sep2ResourceEvent::EndDeviceList(edl) => {
                 generic_log_list(&edl);
@@ -165,8 +192,24 @@ impl Sep2Model {
         events
     }
 
+    /// Returns all resources known to the model as a set of LinkAddedOrUpdated events.
+    pub fn refresh_known_links(self: &Sep2Model) -> Vec<Event> {
+        let resource_links = self.resource_links();
+
+        // Compare the list with an empty list to surface all resources as new links.
+        Self::resource_link_events(BTreeMap::new(), resource_links)
+    }
+
+    /// Upsert the dcap entrypoint
+    fn set_dcap(self: &mut Sep2Model, dcap: &DeviceCapability) -> Vec<Event> {
+        self.dcap = Some(dcap.clone());
+
+        // No responses required.
+        Vec::new()
+    }
+
     /// Upsert an EndDeviceList. Will upsert EndDevices too.
-    pub fn set_end_device_list(self: &mut Sep2Model, incoming: &EndDeviceList) -> Vec<Event> {
+    fn set_end_device_list(self: &mut Sep2Model, incoming: &EndDeviceList) -> Vec<Event> {
         // We should always have a href, but for type safety let's abort early if we don't.
         let Some(href) = require_href(incoming) else {
             return Vec::new();
@@ -196,7 +239,7 @@ impl Sep2Model {
     }
 
     /// Insert/replace information about a single EndDevice in the model.
-    pub fn set_end_device(self: &mut Sep2Model, incoming: &EndDevice) {
+    fn set_end_device(self: &mut Sep2Model, incoming: &EndDevice) {
         let Some(lfdi) = incoming.lfdi else {
             log::warn!(
                 "Ignoring EndDevice ({}) without an LFDI.",
@@ -208,7 +251,7 @@ impl Sep2Model {
     }
 
     /// Upsert a FunctionSetAssignmentsList. Will upsert FunctionSetAssignments too.
-    pub fn set_function_set_assignments_list(
+    fn set_function_set_assignments_list(
         self: &mut Sep2Model,
         incoming: &FunctionSetAssignmentsList,
     ) -> Vec<Event> {
@@ -239,13 +282,13 @@ impl Sep2Model {
     }
 
     /// Upsert a FunctionSetAssignments.
-    pub fn set_function_set_assignments(self: &mut Sep2Model, incoming: &FunctionSetAssignments) {
+    fn set_function_set_assignments(self: &mut Sep2Model, incoming: &FunctionSetAssignments) {
         self.function_set_assignments
             .insert(incoming.mrid, incoming.clone());
     }
 
     /// Upsert a DERProgramList. Will upsert DERPrograms too.
-    pub fn set_der_program_list(self: &mut Sep2Model, incoming: &DERProgramList) -> Vec<Event> {
+    fn set_der_program_list(self: &mut Sep2Model, incoming: &DERProgramList) -> Vec<Event> {
         // We should always have a href, but for type safety let's abort early if we don't.
         let Some(href) = require_href(incoming) else {
             return Vec::new();
@@ -268,12 +311,12 @@ impl Sep2Model {
     }
 
     /// Upsert a DERProgram.
-    pub fn set_der_program(self: &mut Sep2Model, incoming: &DERProgram) {
+    fn set_der_program(self: &mut Sep2Model, incoming: &DERProgram) {
         self.programs.insert(incoming.mrid, incoming.clone());
     }
 
     /// Upsert a DERControlList. Will upsert DERControls too.
-    pub fn set_der_control_list(
+    fn set_der_control_list(
         self: &mut Sep2Model,
         incoming: &DERControlList,
         rng: &mut ThreadRng,
@@ -301,7 +344,7 @@ impl Sep2Model {
     }
 
     /// Upsert a DERControl.
-    pub fn set_der_control(
+    fn set_der_control(
         self: &mut Sep2Model,
         incoming: &DERControl,
         rng: &mut ThreadRng,
@@ -409,10 +452,7 @@ impl Sep2Model {
     }
 
     /// Upsert a DefaultDERControl.
-    pub fn set_default_der_control(
-        self: &mut Sep2Model,
-        incoming: &DefaultDERControl,
-    ) -> Vec<Event> {
+    fn set_default_der_control(self: &mut Sep2Model, incoming: &DefaultDERControl) -> Vec<Event> {
         // We should always have a href, but for type safety let's abort early if we don't.
         let Some(href) = require_href(incoming) else {
             return Vec::new();
@@ -424,7 +464,7 @@ impl Sep2Model {
     }
 
     /// Upsert a DERCurveList. Will upsert DERCurves too.
-    pub fn set_der_curve_list(self: &mut Sep2Model, incoming: &DERCurveList) -> Vec<Event> {
+    fn set_der_curve_list(self: &mut Sep2Model, incoming: &DERCurveList) -> Vec<Event> {
         // We should always have a href, but for type safety let's abort early if we don't.
         let Some(href) = require_href(incoming) else {
             return Vec::new();
@@ -449,12 +489,12 @@ impl Sep2Model {
     }
 
     /// Upsert a DERCurve.
-    pub fn set_der_curve(self: &mut Sep2Model, incoming: &DERCurve) {
+    fn set_der_curve(self: &mut Sep2Model, incoming: &DERCurve) {
         self.curves.insert(incoming.mrid, incoming.clone());
     }
 
     /// Upsert the Time
-    pub fn set_time(self: &mut Sep2Model, time: &Time) -> Vec<Event> {
+    fn set_time(self: &mut Sep2Model, time: &Time) -> Vec<Event> {
         self.time = time.clone();
 
         // No responses required.
@@ -538,13 +578,27 @@ impl Sep2Model {
     /// from the EndDeviceList. Most lists use their own poll rate, and all
     /// other resources use the poll rate of their closest parent list.
     fn resource_links(self: &Sep2Model) -> ResourceLinks {
-        // The Time href is only known once it has been received.
-        let time = self
-            .time
-            .href
-            .iter()
-            .map(|href| resource_link(href, ResourceKind::Time, self.time.poll_rate));
+        // The dcap is the authority on what the hrefs are for time and the edev list. However, the polling rate for these resources is on themselves. Hence we create these links by combining information from multiple places.
+        let dcap = self.dcap.iter().flat_map(|dcap| {
+            dcap.time_link
+                .iter()
+                .map(|link| {
+                    resource_link(link.href.clone(), ResourceKind::Time, self.time.poll_rate)
+                })
+                .chain(dcap.end_device_list_link.iter().map(|link| {
+                    resource_link(
+                        link.href.clone(),
+                        ResourceKind::EndDeviceList,
+                        self.end_device_list
+                            .as_ref()
+                            .and_then(|edevl| edevl.poll_rate),
+                    )
+                }))
+        });
 
+        // Note: this will emit a second edev list link. This is fine, duplicate
+        // links will be collapsed in the BTreeMap and differing links will
+        // allow us to poll the endpoints to get to the correct state.
         let end_devices = self.end_device_list.iter().flat_map(|edl| {
             list_links(
                 &edl.href,
@@ -561,7 +615,7 @@ impl Sep2Model {
             )
         });
 
-        time.chain(end_devices).collect()
+        dcap.chain(end_devices).collect()
     }
 
     /// The links for a FunctionSetAssignmentsList and everything below it.
@@ -863,6 +917,159 @@ fn list_items<'a, K: Eq + Hash, V>(
     list.into_iter()
         .flat_map(|list| &list.items)
         .filter_map(|id| items.get(id))
+}
+
+/// A newtype to generically convert a sepserde serialization to serde
+///
+/// We don't use sepserde itself for the persistence because sepserde/yaserde:
+/// - doesn't support HashMaps, so would need a newtype wrapper.
+/// - doesn't have serialize_with.
+/// - struggles with generics.
+#[derive(PartialEq, Eq, Hash)]
+struct SerdeWrap<T>(T);
+
+impl<T: YaSerialize> Serialize for SerdeWrap<&T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&sepserde::ser::to_string(self.0).map_err(S::Error::custom)?)
+    }
+}
+
+impl<'d, T: YaDeserialize> Deserialize<'d> for SerdeWrap<T> {
+    fn deserialize<D: Deserializer<'d>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        sepserde::de::from_str(&s)
+            .map(SerdeWrap)
+            .map_err(D::Error::custom)
+    }
+}
+
+// Serialization helpers to convert from yaserde/sepserde to serde_json for the
+// std library collections.
+
+mod yaserde {
+    use super::{
+        Deserialize, Deserializer, SerdeWrap, Serialize, Serializer, YaDeserialize, YaSerialize,
+    };
+
+    pub fn serialize<T: YaSerialize, S: Serializer>(value: &T, s: S) -> Result<S::Ok, S::Error> {
+        SerdeWrap(value).serialize(s)
+    }
+
+    pub fn deserialize<'d, T: YaDeserialize, D: Deserializer<'d>>(d: D) -> Result<T, D::Error> {
+        let value = SerdeWrap::<T>::deserialize(d)?;
+
+        Ok(value.0)
+    }
+}
+
+mod yaserde_vec {
+    use super::{Deserialize, Deserializer, SerdeWrap, Serializer, YaDeserialize, YaSerialize};
+
+    pub fn serialize<T: YaSerialize, S: Serializer>(vec: &[T], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(vec.iter().map(SerdeWrap))
+    }
+
+    pub fn deserialize<'d, T: YaDeserialize, D: Deserializer<'d>>(
+        d: D,
+    ) -> Result<Vec<T>, D::Error> {
+        let vec = Vec::<SerdeWrap<T>>::deserialize(d)?;
+
+        Ok(vec.into_iter().map(|x| x.0).collect())
+    }
+}
+
+mod yaserde_opt {
+    use super::{
+        Deserialize, Deserializer, SerdeWrap, Serialize, Serializer, YaDeserialize, YaSerialize,
+    };
+
+    pub fn serialize<T: YaSerialize, S: Serializer>(
+        opt: &Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        opt.as_ref().map(SerdeWrap).serialize(s)
+    }
+
+    pub fn deserialize<'d, T: YaDeserialize, D: Deserializer<'d>>(
+        d: D,
+    ) -> Result<Option<T>, D::Error> {
+        let opt = Option::<SerdeWrap<T>>::deserialize(d)?;
+        Ok(opt.map(|x| x.0))
+    }
+}
+
+mod yaserde_map_both {
+    use super::{Deserialize, Deserializer, SerdeWrap, Serializer, YaDeserialize, YaSerialize};
+    use std::{collections::HashMap, hash::Hash};
+
+    pub fn serialize<K: YaSerialize, V: YaSerialize, S: Serializer>(
+        map: &HashMap<K, V>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        s.collect_map(map.iter().map(|(k, v)| (SerdeWrap(k), SerdeWrap(v))))
+    }
+
+    pub fn deserialize<'d, K: YaDeserialize + Eq + Hash, V: YaDeserialize, D: Deserializer<'d>>(
+        d: D,
+    ) -> Result<HashMap<K, V>, D::Error> {
+        let map = HashMap::<SerdeWrap<K>, SerdeWrap<V>>::deserialize(d)?;
+
+        Ok(map.into_iter().map(|(k, v)| (k.0, v.0)).collect())
+    }
+}
+
+mod yaserde_map_keys {
+    use super::{
+        Deserialize, Deserializer, SerdeWrap, Serialize, Serializer, YaDeserialize, YaSerialize,
+    };
+    use std::{collections::HashMap, hash::Hash};
+
+    pub fn serialize<K: YaSerialize, V: Serialize, S: Serializer>(
+        map: &HashMap<K, V>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        s.collect_map(map.iter().map(|(k, v)| (SerdeWrap(k), v)))
+    }
+
+    pub fn deserialize<
+        'd,
+        K: YaDeserialize + Eq + Hash,
+        V: Deserialize<'d>,
+        D: Deserializer<'d>,
+    >(
+        d: D,
+    ) -> Result<HashMap<K, V>, D::Error> {
+        let map = HashMap::<SerdeWrap<K>, V>::deserialize(d)?;
+
+        Ok(map.into_iter().map(|(k, v)| (k.0, v)).collect())
+    }
+}
+
+mod yaserde_map_values {
+    use super::{
+        Deserialize, Deserializer, SerdeWrap, Serialize, Serializer, YaDeserialize, YaSerialize,
+    };
+    use std::{collections::HashMap, hash::Hash};
+
+    pub fn serialize<K: Serialize, V: YaSerialize, S: Serializer>(
+        map: &HashMap<K, V>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        s.collect_map(map.iter().map(|(k, v)| (k, SerdeWrap(v))))
+    }
+
+    pub fn deserialize<
+        'd,
+        K: Deserialize<'d> + Eq + Hash,
+        V: YaDeserialize,
+        D: Deserializer<'d>,
+    >(
+        d: D,
+    ) -> Result<HashMap<K, V>, D::Error> {
+        let map = HashMap::<K, SerdeWrap<V>>::deserialize(d)?;
+
+        Ok(map.into_iter().map(|(k, v)| (k, v.0)).collect())
+    }
 }
 
 #[cfg(test)]
@@ -1231,6 +1438,17 @@ mod tests {
         assert!(model.controls.is_empty());
         assert!(model.curves.is_empty());
         assert!(model.default_controls.is_empty());
+    }
+
+    #[test]
+    fn model_serialisation_round_trip() {
+        let mut model = Sep2Model::default();
+        setup_model_with_mocks(&mut model);
+
+        let json = serde_json::to_string(&model).expect("Serialization failed");
+        let restored: Sep2Model = serde_json::from_str(&json).expect("Deserialization failed");
+
+        assert_eq!(restored, model);
     }
 
     fn setup_model_with_mocks(model: &mut Sep2Model) -> Vec<Event> {

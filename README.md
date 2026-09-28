@@ -52,7 +52,7 @@ Note that TLS will not work out of the box on a current OpenSSL — see
 
 | Option                    | Default                   | Notes                                                                                                     |
 |---------------------------|---------------------------|-----------------------------------------------------------------------------------------------------------|
-| `--credentials-directory` | *(required)*              | Directory holding `client.crt`, `client.key` and optionally `registration_pin`                            |
+| `--credentials-directory` | *(required)*              | Directory holding `client.crt`, `client.key` and optionally `registration_pin`. The option name aligns with the systemd `$CREDENTIALS_DIRECTORY` convention. |
 | `--modbus-socket`         | *(required)*              | `tcp://<ip>[:<port>]` or `unix:///path/to.sock`              |
 | `--ca-path`               | `/etc/sep2-bridge/ca.crt` | CA certificate for server verification |
 | `--server-addr`           | `127.0.0.1:8080`          | The CSIP-AUS server address.                                                                            |
@@ -63,6 +63,23 @@ Note that TLS will not work out of the box on a current OpenSSL — see
 | `--pen`                   | `0`                       | Private Enterprise Number, used to make generated mRIDs unique                                            |
 | `--metrics-url`           | None                      | If given, a unix socket path to push metrics (`unix:///path/to.sock`) |
 | `--metrics-interval-sec`  | `60`                      | How often to push metrics to the metrics URL |
+| `--cache-directory`       | `$HOME/.cache/sep2-bridge`| Where to persist and restore scheduler state. The option name aligns with the systemd `$CACHE_DIRECTORY` convention. |
+
+## Scheduler state persistence
+
+It is recommended to use a cache directory with the sep2-bridge service, and
+this is enabled and configured by default. When running as a systemd service,
+the locationed `$CACHE_DIRECTORY` will be used. When running otherwise, it
+will use `$XDG_CACHE_HOME` or `$HOME/.cache/sep2-bridge`.
+
+Having the scheduler state persisted means that the service will remember all
+control parameters across a restart and not have to reach out to the upstream
+SEP2 server, which may not be available at the time due to connection issues.
+The scheduler will also persist the realisation of randomised control start and
+end times.
+
+If necessary for testing purposes, or when no writable filesystem is available,
+persistence can be disabled with the flag `--no-persistence`.
 
 ## Credentials and TLS
 
