@@ -7,7 +7,7 @@ use sep2_common::{
 };
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     process::ExitCode,
@@ -85,6 +85,16 @@ pub struct Args {
     /// How often to send metrics to the metrics endpoint.
     #[clap(env, long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     metrics_interval_sec: u64,
+
+    /// A directory in which to persist and restore scheduler state. Defaults to
+    /// $XDG_CACHE_HOME/sep2-bridge or $HOME/.cache/sep2-bridge.
+    #[clap(env, long, value_parser = parse_cache_directory)]
+    cache_directory: Option<PathBuf>,
+
+    /// Disable persistence of scheduler state. Takes precedence over
+    /// --cache-directory.
+    #[clap(env, long, default_value_t = false)]
+    no_persistence: bool,
 }
 
 fn validate_path_exists(input: &str) -> std::result::Result<PathBuf, String> {
@@ -219,15 +229,48 @@ fn parse_pen(value: &str) -> std::result::Result<Pen, String> {
         })
 }
 
+fn parse_cache_directory(value: &str) -> std::result::Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    // Create the directories to this path if we can. This also handles the
+    // error case when the path is a file and not a directory.
+    fs::create_dir_all(&path)
+        .map_err(|err| format!("Unable to create directory {}: {err}", path.display()))?;
+
+    Ok(path)
+}
+
+fn default_cache_directory() -> Result<PathBuf> {
+    // Lookup either $XDG_CACHE_HOME or $HOME/.cache.
+    let cache_home = match env::var("XDG_CACHE_HOME") {
+        // If the path is not absolute it is an invalid value in the XDG spec.
+        Ok(path) if PathBuf::from(&path).is_absolute() => PathBuf::from(path),
+        _ => match env::var("HOME") {
+            Err(_) => Err(Error::InvalidInput("HOME is not set".into()))?,
+            Ok(path) => PathBuf::from(path).join(".cache"),
+        },
+    };
+
+    let path = cache_home.join("sep2-bridge");
+    parse_cache_directory(&path.to_string_lossy()).map_err(Error::InvalidInput)
+}
+
 // Force a relatively quick tickrate for checking on polls. This time has to
 // be shorter than any possible poll rate.
 const POLL_TICKRATE: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
-    let args = Args::parse();
-
     env_logger::builder().format_timestamp_millis().init();
+
+    let args = Args::parse();
+    let cache_directory = if args.no_persistence {
+        None
+    } else {
+        Some(
+            args.cache_directory
+                .map_or_else(default_cache_directory, Ok)?,
+        )
+    };
 
     log::info!("sep2-bridge started. Connecting to {}.", args.server_addr);
 
@@ -322,6 +365,7 @@ async fn main() -> Result<ExitCode> {
         scheduler_input_rx,
         scheduler_input_tx.clone(),
         lfdi,
+        cache_directory,
     ));
     task_names.insert(handle.id(), "scheduler");
 
@@ -374,8 +418,9 @@ async fn main() -> Result<ExitCode> {
         .send(sep2_connection::Command::Wake)
         .await
         .map_err(|_| Error::ChannelClosed)?;
+    // The wake-up action for the scheduler is to emit all known resources.
     scheduler_input_tx
-        .send(scheduler::Command::NextSchedule)
+        .send(scheduler::Command::RefreshActiveResources)
         .await
         .map_err(|_| Error::ChannelClosed)?;
 
