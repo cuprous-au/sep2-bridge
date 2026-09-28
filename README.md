@@ -69,7 +69,7 @@ Note that TLS will not work out of the box on a current OpenSSL — see
 
 It is recommended to use a cache directory with the sep2-bridge service, and
 this is enabled and configured by default. When running as a systemd service,
-the locationed `$CACHE_DIRECTORY` will be used. When running otherwise, it
+the location `$CACHE_DIRECTORY` will be used. When running otherwise, it
 will use `$XDG_CACHE_HOME` or `$HOME/.cache/sep2-bridge`.
 
 Having the scheduler state persisted means that the service will remember all
