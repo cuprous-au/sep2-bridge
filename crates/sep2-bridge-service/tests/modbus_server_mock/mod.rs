@@ -392,17 +392,65 @@ pub fn add_model_702(
         location(Model702::W_MAX_RTG, offset),
     );
     Model702::W_OVR_EXT_RTG.fill_registers(registers, offset, Some(1000));
+    locations.insert(
+        "model702::W_OVR_EXT_RTG".into(),
+        location(Model702::W_OVR_EXT_RTG, offset),
+    );
     Model702::W_OVR_EXT_RTG_PF.fill_registers(registers, offset, Some(1));
+    locations.insert(
+        "model702::W_OVR_EXT_RTG_PF".into(),
+        location(Model702::W_OVR_EXT_RTG_PF, offset),
+    );
     Model702::W_UND_EXT_RTG.fill_registers(registers, offset, Some(200));
+    locations.insert(
+        "model702::W_UND_EXT_RTG".into(),
+        location(Model702::W_UND_EXT_RTG, offset),
+    );
     Model702::W_UND_EXT_RTG_PF.fill_registers(registers, offset, Some(0));
+    locations.insert(
+        "model702::W_UND_EXT_RTG_PF".into(),
+        location(Model702::W_UND_EXT_RTG_PF, offset),
+    );
     Model702::VA_MAX_RTG.fill_registers(registers, offset, Some(5000));
+    locations.insert(
+        "model702::VA_MAX_RTG".into(),
+        location(Model702::VA_MAX_RTG, offset),
+    );
     Model702::VAR_MAX_INJ_RTG.fill_registers(registers, offset, Some(400));
+    locations.insert(
+        "model702::VAR_MAX_INJ_RTG".into(),
+        location(Model702::VAR_MAX_INJ_RTG, offset),
+    );
     Model702::VAR_MAX_ABS_RTG.fill_registers(registers, offset, Some(420));
+    locations.insert(
+        "model702::VAR_MAX_ABS_RTG".into(),
+        location(Model702::VAR_MAX_ABS_RTG, offset),
+    );
     Model702::W_CHA_RTE_MAX_RTG.fill_registers(registers, offset, Some(630));
+    locations.insert(
+        "model702::W_CHA_RTE_MAX_RTG".into(),
+        location(Model702::W_CHA_RTE_MAX_RTG, offset),
+    );
     Model702::VA_CHA_RTE_MAX_RTG.fill_registers(registers, offset, Some(650));
+    locations.insert(
+        "model702::VA_CHA_RTE_MAX_RTG".into(),
+        location(Model702::VA_CHA_RTE_MAX_RTG, offset),
+    );
     Model702::V_NOM_RTG.fill_registers(registers, offset, Some(9000));
+    locations.insert(
+        "model702::V_NOM_RTG".into(),
+        location(Model702::V_NOM_RTG, offset),
+    );
     Model702::V_MAX_RTG.fill_registers(registers, offset, Some(9100));
+    locations.insert(
+        "model702::V_MAX_RTG".into(),
+        location(Model702::V_MAX_RTG, offset),
+    );
     Model702::V_MIN_RTG.fill_registers(registers, offset, Some(8900));
+    locations.insert(
+        "model702::V_MIN_RTG".into(),
+        location(Model702::V_MIN_RTG, offset),
+    );
     Model702::CTRL_MODES.fill_registers(
         registers,
         offset,
@@ -422,7 +470,25 @@ pub fn add_model_702(
                 | CtrlModes::HfTrip,
         ),
     );
+    locations.insert(
+        "model702::CTRL_MODES".into(),
+        location(Model702::CTRL_MODES, offset),
+    );
     Model702::REACT_SUSCEPT_RTG.fill_registers(registers, offset, Some(1234));
+    locations.insert(
+        "model702::REACT_SUSCEPT_RTG".into(),
+        location(Model702::REACT_SUSCEPT_RTG, offset),
+    );
+
+    locations.insert("model702::W_SF".into(), location(Model702::W_SF, offset));
+    locations.insert("model702::PF_SF".into(), location(Model702::PF_SF, offset));
+    locations.insert("model702::VA_SF".into(), location(Model702::VA_SF, offset));
+    locations.insert(
+        "model702::VAR_SF".into(),
+        location(Model702::VAR_SF, offset),
+    );
+    locations.insert("model702::V_SF".into(), location(Model702::V_SF, offset));
+    locations.insert("model702::S_SF".into(), location(Model702::S_SF, offset));
 
     offset + usize::from(Model702::LEN)
 }
