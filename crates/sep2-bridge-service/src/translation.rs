@@ -85,36 +85,65 @@ impl TryFrom<ModbusCapabilities> for DERCapability {
             rtg_max_w: caps
                 .w_max_rtg
                 .try_convert_mandatory()
-                .map_err(|err| err.name("w_max_rtg"))?,
+                .map_err(|err| err.name("rtg_max_w"))?,
             rtg_over_excited_w: caps
                 .w_ovr_ext_rtg
                 .try_convert()
                 .map_err(|err| err.name("rtg_over_excited_w"))?,
-            rtg_over_excited_pf: caps.w_ovr_ext_rtg_pf.convert(),
+            rtg_over_excited_pf: caps
+                .w_ovr_ext_rtg_pf
+                .try_convert()
+                .map_err(|err| err.name("rtg_over_excited_pf"))?,
             rtg_under_excited_w: caps
                 .w_und_ext_rtg
                 .try_convert()
                 .map_err(|err| err.name("rtg_under_excited_w"))?,
-            rtg_under_excited_pf: caps.w_und_ext_rtg_pf.convert(),
-            rtg_max_va: caps.va_max_rtg.convert(),
+            rtg_under_excited_pf: caps
+                .w_und_ext_rtg_pf
+                .try_convert()
+                .map_err(|err| err.name("rtg_under_excited_pf"))?,
+            rtg_max_va: caps
+                .va_max_rtg
+                .try_convert()
+                .map_err(|err| err.name("rtg_max_va"))?,
             rtg_max_var: caps
                 .var_max_inj_rtg
                 .try_convert()
-                .map_err(|err| err.name("var_max_inj_rtg"))?,
+                .map_err(|err| err.name("rtg_max_var"))?,
             rtg_max_var_neg: caps
                 .var_max_abs_rtg
                 .try_convert()
-                .map_err(|err| err.name("var_max_abs_rtg"))?,
+                .map_err(|err| err.name("rtg_max_var_neg"))?
+                // Sunspec gives the absorbed rating as a magnitude, SEP2 expects it negative.
+                .map(|var: ReactivePower| ReactivePower {
+                    value: Int16(-var.value.0),
+                    ..var
+                }),
             rtg_max_charge_rate_w: caps
                 .w_cha_rte_max_rtg
                 .try_convert()
-                .map_err(|err| err.name("w_cha_rte_max_rtg"))?,
-            rtg_max_charge_rate_va: caps.va_cha_rte_max_rtg.convert(),
-            rtg_v_nom: caps.v_nom_rtg.convert(),
-            rtg_max_v: caps.v_max_rtg.convert(),
-            rtg_min_v: caps.v_min_rtg.convert(),
+                .map_err(|err| err.name("rtg_max_charge_rate_w"))?,
+            rtg_max_charge_rate_va: caps
+                .va_cha_rte_max_rtg
+                .try_convert()
+                .map_err(|err| err.name("rtg_max_charge_rate_va"))?,
+            rtg_v_nom: caps
+                .v_nom_rtg
+                .try_convert()
+                .map_err(|err| err.name("rtg_v_nom"))?,
+            rtg_max_v: caps
+                .v_max_rtg
+                .try_convert()
+                .map_err(|err| err.name("rtg_max_v"))?,
+            rtg_min_v: caps
+                .v_min_rtg
+                .try_convert()
+                .map_err(|err| err.name("rtg_min_v"))?,
             modes_supported: caps.ctrl_modes.convert(),
-            rtg_reactive_susceptance: caps.react_suscept_rtg.convert(),
+            rtg_reactive_susceptance: caps
+                .react_suscept_rtg
+                .try_convert()
+                .map_err(|err| err.name("rtg_reactive_susceptance"))?,
             ..Default::default()
         })
     }
@@ -185,6 +214,7 @@ impl TryFrom<ModbusMetering> for Vec<MirrorMeterReading> {
         let now = Int64(Utc::now().timestamp());
 
         let template_reading_type = ReadingType {
+            kind: Some(KindType::Power),
             accumulation_behaviour: Some(AccumulationBehaviourType::Instantaneous),
             commodity: Some(CommodityType::ElectricitySecondaryMetered),
             ..Default::default()
@@ -204,7 +234,6 @@ impl TryFrom<ModbusMetering> for Vec<MirrorMeterReading> {
                         description: Some(String32(name.into())),
                         reading_type: Some(ReadingType {
                             flow_direction: Some(FlowDirectionType::Reverse),
-                            kind: Some(KindType::Power),
                             uom: Some(UomType::W),
                             power_of_ten_multiplier: metering
                                 .w_sf
@@ -235,7 +264,6 @@ impl TryFrom<ModbusMetering> for Vec<MirrorMeterReading> {
                     description: Some(String32("reactive_power".into())),
                     reading_type: Some(ReadingType {
                         flow_direction: Some(FlowDirectionType::Reverse),
-                        kind: Some(KindType::Power),
                         uom: Some(UomType::VAr),
                         power_of_ten_multiplier: metering
                             .var_sf
@@ -704,48 +732,48 @@ impl Convert<Uint32> for u32 {
     }
 }
 
-impl TryConvert<ActivePower> for u16 {
-    fn try_convert(self: u16) -> ResultUnnamed<ActivePower> {
+impl TryConvert<ActivePower> for ScaledValue<u16> {
+    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<ActivePower> {
         Ok(ActivePower {
-            value: self.try_convert()?,
-            multiplier: PowerOfTenMultiplierType::None,
+            value: self.value.try_convert()?,
+            multiplier: self.sf.try_convert()?,
         })
     }
 }
 
-impl Convert<PowerFactor> for u16 {
-    fn convert(self: u16) -> PowerFactor {
-        PowerFactor {
-            displacement: Uint16(self),
-            multiplier: PowerOfTenMultiplierType::None,
-        }
+impl TryConvert<PowerFactor> for ScaledValue<u16> {
+    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<PowerFactor> {
+        Ok(PowerFactor {
+            displacement: Uint16(self.value),
+            multiplier: self.sf.try_convert()?,
+        })
     }
 }
 
-impl Convert<ApparentPower> for u16 {
-    fn convert(self: u16) -> ApparentPower {
-        ApparentPower {
-            value: Uint16(self),
-            multiplier: PowerOfTenMultiplierType::None,
-        }
+impl TryConvert<ApparentPower> for ScaledValue<u16> {
+    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<ApparentPower> {
+        Ok(ApparentPower {
+            value: Uint16(self.value),
+            multiplier: self.sf.try_convert()?,
+        })
     }
 }
 
-impl TryConvert<ReactivePower> for u16 {
-    fn try_convert(self: u16) -> ResultUnnamed<ReactivePower> {
+impl TryConvert<ReactivePower> for ScaledValue<u16> {
+    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<ReactivePower> {
         Ok(ReactivePower {
-            value: Int16(i16::try_from(self).map_err(|_| Error::IntegerOverflow)?),
-            multiplier: PowerOfTenMultiplierType::None,
+            value: self.value.try_convert()?,
+            multiplier: self.sf.try_convert()?,
         })
     }
 }
 
-impl Convert<VoltageRMS> for u16 {
-    fn convert(self: u16) -> VoltageRMS {
-        VoltageRMS {
-            value: Uint16(self),
-            multiplier: PowerOfTenMultiplierType::None,
-        }
+impl TryConvert<VoltageRMS> for ScaledValue<u16> {
+    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<VoltageRMS> {
+        Ok(VoltageRMS {
+            value: Uint16(self.value),
+            multiplier: self.sf.try_convert()?,
+        })
     }
 }
 
@@ -808,12 +836,12 @@ impl Convert<DERControlType> for Option<CtrlModes> {
     }
 }
 
-impl Convert<ReactiveSusceptance> for u16 {
-    fn convert(self: u16) -> ReactiveSusceptance {
-        ReactiveSusceptance {
-            value: Uint16(self),
-            multiplier: PowerOfTenMultiplierType::None,
-        }
+impl TryConvert<ReactiveSusceptance> for ScaledValue<u16> {
+    fn try_convert(self: ScaledValue<u16>) -> ResultUnnamed<ReactiveSusceptance> {
+        Ok(ReactiveSusceptance {
+            value: Uint16(self.value),
+            multiplier: self.sf.try_convert()?,
+        })
     }
 }
 
@@ -1253,31 +1281,33 @@ mod tests {
 
     #[test]
     fn missing_mandatory_fails() {
-        let result: ResultUnnamed<ActivePower> = None::<u16>.try_convert_mandatory();
+        let result: ResultUnnamed<ActivePower> = None::<ScaledValue<u16>>.try_convert_mandatory();
         assert!(matches!(result, Err(Error::MandatoryNone)));
     }
 
     #[test]
     fn mandatory_conversion() {
-        let result: ResultUnnamed<ActivePower> = Some(0u16).try_convert_mandatory();
+        let result: ResultUnnamed<ActivePower> =
+            Some(ScaledValue::new(0u16, 0)).try_convert_mandatory();
         assert!(result.is_ok());
     }
 
     #[test]
     fn options_none() {
-        let result: ResultUnnamed<Option<ActivePower>> = None::<u16>.try_convert();
+        let result: ResultUnnamed<Option<ActivePower>> = None::<ScaledValue<u16>>.try_convert();
         assert!(matches!(result, Ok(None)));
 
-        let result: Option<PowerFactor> = None::<u16>.convert();
+        let result: Option<u16> = None::<Uint16>.convert();
         assert!(result.is_none());
     }
 
     #[test]
     fn options_some() {
-        let result: ResultUnnamed<Option<ActivePower>> = Some(0u16).try_convert();
+        let result: ResultUnnamed<Option<ActivePower>> =
+            Some(ScaledValue::new(0u16, 0)).try_convert();
         assert!(matches!(result, Ok(Some(_))));
 
-        let result: Option<PowerFactor> = Some(0u16).convert();
+        let result: Option<u16> = Some(Uint16(0)).convert();
         assert!(result.is_some());
     }
 
@@ -1377,25 +1407,38 @@ mod tests {
     #[test]
     fn capabilities() {
         let capabilities = ModbusCapabilities {
-            w_max_rtg: Some(42),
-            w_ovr_ext_rtg: Some(43),
-            w_ovr_ext_rtg_pf: Some(1),
-            w_und_ext_rtg: Some(44),
-            w_und_ext_rtg_pf: Some(2),
-            va_max_rtg: Some(45),
-            var_max_inj_rtg: Some(46),
-            var_max_abs_rtg: Some(47),
-            w_cha_rte_max_rtg: Some(48),
-            va_cha_rte_max_rtg: Some(49),
-            v_nom_rtg: Some(50),
-            v_max_rtg: Some(51),
-            v_min_rtg: Some(52),
+            w_max_rtg: Some(ScaledValue::new(42, 1)),
+            w_ovr_ext_rtg: Some(ScaledValue::new(43, 1)),
+            w_ovr_ext_rtg_pf: Some(ScaledValue::new(95, -2)),
+            w_und_ext_rtg: Some(ScaledValue::new(44, 1)),
+            w_und_ext_rtg_pf: Some(ScaledValue::new(90, -2)),
+            va_max_rtg: Some(ScaledValue::new(45, 0)),
+            var_max_inj_rtg: Some(ScaledValue::new(46, 0)),
+            var_max_abs_rtg: Some(ScaledValue::new(47, 0)),
+            w_cha_rte_max_rtg: Some(ScaledValue::new(48, 1)),
+            va_cha_rte_max_rtg: Some(ScaledValue::new(49, 0)),
+            v_nom_rtg: Some(ScaledValue::new(2300, -1)),
+            v_max_rtg: Some(ScaledValue::new(2530, -1)),
+            v_min_rtg: Some(ScaledValue::new(2070, -1)),
             ctrl_modes: Some(CtrlModes::MaxW | CtrlModes::HfTrip),
-            react_suscept_rtg: Some(53),
+            react_suscept_rtg: Some(ScaledValue::new(53, 0)),
         };
 
-        let result: Result<DERCapability> = capabilities.try_into();
-        assert!(result.is_ok());
+        let result: DERCapability = capabilities.try_into().expect("Translation failed");
+
+        // The device's scale factors must be carried through as SEP2 multipliers.
+        assert_eq!(result.rtg_max_w.value, Int16(42));
+        assert_eq!(result.rtg_max_w.multiplier, PowerOfTenMultiplierType::Deca);
+        let pf = result.rtg_over_excited_pf.expect("Missing PF");
+        assert_eq!(pf.displacement, Uint16(95));
+        assert_eq!(pf.multiplier, PowerOfTenMultiplierType::Centi);
+        let v_nom = result.rtg_v_nom.expect("Missing VNom");
+        assert_eq!(v_nom.value, Uint16(2300));
+        assert_eq!(v_nom.multiplier, PowerOfTenMultiplierType::Deci);
+
+        // The absorbed var rating is a magnitude in sunspec but negative in SEP2.
+        let var_neg = result.rtg_max_var_neg.expect("Missing VarNeg");
+        assert_eq!(var_neg.value, Int16(-47));
     }
 
     #[test]

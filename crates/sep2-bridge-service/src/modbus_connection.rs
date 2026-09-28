@@ -392,41 +392,61 @@ async fn read_model_safe<M: Model>(device: &AsyncDevice<TokioModbusContext>) -> 
 
 #[derive(Clone, Debug)]
 pub struct Capabilities {
-    pub w_max_rtg: Option<u16>,
-    pub w_ovr_ext_rtg: Option<u16>,
-    pub w_ovr_ext_rtg_pf: Option<u16>,
-    pub w_und_ext_rtg: Option<u16>,
-    pub w_und_ext_rtg_pf: Option<u16>,
-    pub va_max_rtg: Option<u16>,
-    pub var_max_inj_rtg: Option<u16>,
-    pub var_max_abs_rtg: Option<u16>,
-    pub w_cha_rte_max_rtg: Option<u16>,
-    pub va_cha_rte_max_rtg: Option<u16>,
-    pub v_nom_rtg: Option<u16>,
-    pub v_max_rtg: Option<u16>,
-    pub v_min_rtg: Option<u16>,
+    pub w_max_rtg: Option<ScaledValue<u16>>,
+    pub w_ovr_ext_rtg: Option<ScaledValue<u16>>,
+    pub w_ovr_ext_rtg_pf: Option<ScaledValue<u16>>,
+    pub w_und_ext_rtg: Option<ScaledValue<u16>>,
+    pub w_und_ext_rtg_pf: Option<ScaledValue<u16>>,
+    pub va_max_rtg: Option<ScaledValue<u16>>,
+    pub var_max_inj_rtg: Option<ScaledValue<u16>>,
+    pub var_max_abs_rtg: Option<ScaledValue<u16>>,
+    pub w_cha_rte_max_rtg: Option<ScaledValue<u16>>,
+    pub va_cha_rte_max_rtg: Option<ScaledValue<u16>>,
+    pub v_nom_rtg: Option<ScaledValue<u16>>,
+    pub v_max_rtg: Option<ScaledValue<u16>>,
+    pub v_min_rtg: Option<ScaledValue<u16>>,
     pub ctrl_modes: Option<CtrlModes>,
-    pub react_suscept_rtg: Option<u16>,
+    pub react_suscept_rtg: Option<ScaledValue<u16>>,
 }
 
 impl From<Model702> for Capabilities {
     fn from(m702: Model702) -> Self {
+        let w_sf = m702.w_sf.unwrap_or_default();
+        let pf_sf = m702.pf_sf.unwrap_or_default();
+        let va_sf = m702.va_sf.unwrap_or_default();
+        let var_sf = m702.var_sf.unwrap_or_default();
+        let v_sf = m702.v_sf.unwrap_or_default();
+        let s_sf = m702.s_sf.unwrap_or_default();
         Capabilities {
-            w_max_rtg: m702.w_max_rtg,
-            w_ovr_ext_rtg: m702.w_ovr_ext_rtg,
-            w_ovr_ext_rtg_pf: m702.w_ovr_ext_rtg_pf,
-            w_und_ext_rtg: m702.w_und_ext_rtg,
-            w_und_ext_rtg_pf: m702.w_und_ext_rtg_pf,
-            va_max_rtg: m702.va_max_rtg,
-            var_max_inj_rtg: m702.var_max_inj_rtg,
-            var_max_abs_rtg: m702.var_max_abs_rtg,
-            w_cha_rte_max_rtg: m702.w_cha_rte_max_rtg,
-            va_cha_rte_max_rtg: m702.va_cha_rte_max_rtg,
-            v_nom_rtg: m702.v_nom_rtg,
-            v_max_rtg: m702.v_max_rtg,
-            v_min_rtg: m702.v_min_rtg,
+            w_max_rtg: m702.w_max_rtg.map(|val| ScaledValue::new(val, w_sf)),
+            w_ovr_ext_rtg: m702.w_ovr_ext_rtg.map(|val| ScaledValue::new(val, w_sf)),
+            w_ovr_ext_rtg_pf: m702
+                .w_ovr_ext_rtg_pf
+                .map(|val| ScaledValue::new(val, pf_sf)),
+            w_und_ext_rtg: m702.w_und_ext_rtg.map(|val| ScaledValue::new(val, w_sf)),
+            w_und_ext_rtg_pf: m702
+                .w_und_ext_rtg_pf
+                .map(|val| ScaledValue::new(val, pf_sf)),
+            va_max_rtg: m702.va_max_rtg.map(|val| ScaledValue::new(val, va_sf)),
+            var_max_inj_rtg: m702
+                .var_max_inj_rtg
+                .map(|val| ScaledValue::new(val, var_sf)),
+            var_max_abs_rtg: m702
+                .var_max_abs_rtg
+                .map(|val| ScaledValue::new(val, var_sf)),
+            w_cha_rte_max_rtg: m702
+                .w_cha_rte_max_rtg
+                .map(|val| ScaledValue::new(val, w_sf)),
+            va_cha_rte_max_rtg: m702
+                .va_cha_rte_max_rtg
+                .map(|val| ScaledValue::new(val, va_sf)),
+            v_nom_rtg: m702.v_nom_rtg.map(|val| ScaledValue::new(val, v_sf)),
+            v_max_rtg: m702.v_max_rtg.map(|val| ScaledValue::new(val, v_sf)),
+            v_min_rtg: m702.v_min_rtg.map(|val| ScaledValue::new(val, v_sf)),
             ctrl_modes: m702.ctrl_modes,
-            react_suscept_rtg: m702.react_suscept_rtg,
+            react_suscept_rtg: m702
+                .react_suscept_rtg
+                .map(|val| ScaledValue::new(val, s_sf)),
         }
     }
 }

@@ -180,7 +180,7 @@ async fn reads_device_state() {
         |ev| matches!(ev, modbus_connection::Event::CapabilitiesPolled(
             Capabilities { w_max_rtg, .. }
         )
-            if w_max_rtg == &expected_w_max_rtg
+            if w_max_rtg.map(|w| w.value) == expected_w_max_rtg
         )
     ));
 
@@ -242,7 +242,7 @@ async fn reconnects() {
     assert!(all_events.iter().any(
         |ev| matches!(ev, modbus_connection::Event::CapabilitiesPolled(
             Capabilities { w_max_rtg, .. }
-        ) if w_max_rtg == &expected_w_max_rtg
+        ) if w_max_rtg.map(|w| w.value) == expected_w_max_rtg
         )
     ));
 }
