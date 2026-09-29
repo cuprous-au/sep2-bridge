@@ -58,6 +58,15 @@ pub enum Event {
         status: ResponseStatus,
         reply_to: String,
     },
+
+    /// The post rates have changed.
+    PostRatesChanged(PostRates),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PostRates {
+    pub der: Option<u32>,
+    pub mirror_usage_point: Option<u32>,
 }
 
 /// The scheduler loop.
@@ -81,6 +90,7 @@ pub async fn task(
     let mut prior_next_events = Vec::new();
     let mut prior_next_scheduler_time = None;
     let mut prior_parameters = ControlAttributes::default();
+    let mut prior_post_rates = PostRates::default();
 
     while let Some(command) = input_ch.recv().await {
         match command {
@@ -121,6 +131,19 @@ pub async fn task(
                 }
             }
         };
+
+        // If the post rates changed send them out.
+        let cur_post_rates = PostRates {
+            der: model.der_list_poll_rate(device_lfdi),
+            mirror_usage_point: model.mirror_usage_point_post_rate(device_lfdi),
+        };
+        if cur_post_rates != prior_post_rates {
+            output_ch
+                .broadcast(Event::PostRatesChanged(cur_post_rates.clone()))
+                .await
+                .map_err(|_| Error::ChannelClosed)?;
+            prior_post_rates = cur_post_rates;
+        }
 
         let now = Utc::now();
 

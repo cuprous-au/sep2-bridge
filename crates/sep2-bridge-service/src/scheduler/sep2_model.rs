@@ -6,12 +6,13 @@ use sep2_common::{
     packages::{
         dcap::DeviceCapability,
         der::{
-            DERControl, DERControlList, DERCurve, DERCurveList, DERProgram, DERProgramList,
-            DefaultDERControl,
+            DERControl, DERControlList, DERCurve, DERCurveList, DERList, DERProgram,
+            DERProgramList, DefaultDERControl,
         },
         edev::{EndDevice, EndDeviceList},
         fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
         identification::{ResponseRequired, ResponseStatus},
+        metering_mirror::MirrorUsagePointList,
         objects::EventStatusType,
         primitives::{HexBinary160, Int64, Uint32},
         time::Time,
@@ -117,6 +118,11 @@ pub struct Sep2Model {
     // links for the edev list and time.
     #[serde(with = "yaserde_opt")]
     dcap: Option<DeviceCapability>,
+    // The MUPL and DERL are stored to calculate post rates.
+    #[serde(with = "yaserde_opt")]
+    mirror_usage_point_list: Option<MirrorUsagePointList>,
+    #[serde(with = "yaserde_map_values")]
+    der_lists: HashMap<String, DERList>,
 
     // The individual resource definitions.
     // End devices are keyed by LFDI, as an href may refer to a different
@@ -178,6 +184,14 @@ impl Sep2Model {
                 self.set_der_curve_list(&curves)
             }
             Sep2ResourceEvent::DefaultDERControl(dderc) => self.set_default_der_control(&dderc),
+            Sep2ResourceEvent::DERList(derl) => {
+                generic_log_list(&derl);
+                self.set_der_list(&derl)
+            }
+            Sep2ResourceEvent::MirrorUsagePointList(mupl) => {
+                generic_log_list(&mupl);
+                self.set_mirror_usage_point_list(&mupl)
+            }
         };
 
         let resource_links_after = self.resource_links();
@@ -463,6 +477,29 @@ impl Sep2Model {
         Vec::new()
     }
 
+    /// Upsert a DERList.
+    fn set_der_list(self: &mut Sep2Model, incoming: &DERList) -> Vec<Event> {
+        // We should always have a href, but for type safety let's abort early if we don't.
+        let Some(href) = require_href(incoming) else {
+            return Vec::new();
+        };
+        self.der_lists.insert(href, incoming.clone());
+
+        // No responses required.
+        Vec::new()
+    }
+
+    /// Upsert the MirrorUsagePointList.
+    fn set_mirror_usage_point_list(
+        self: &mut Sep2Model,
+        incoming: &MirrorUsagePointList,
+    ) -> Vec<Event> {
+        self.mirror_usage_point_list = Some(incoming.clone());
+
+        // No responses required.
+        Vec::new()
+    }
+
     /// Upsert a DERCurveList. Will upsert DERCurves too.
     fn set_der_curve_list(self: &mut Sep2Model, incoming: &DERCurveList) -> Vec<Event> {
         // We should always have a href, but for type safety let's abort early if we don't.
@@ -513,6 +550,13 @@ impl Sep2Model {
             .retain(|key, _| resource_links.contains_key(key));
         self.curve_lists
             .retain(|key, _| resource_links.contains_key(key));
+        self.der_lists
+            .retain(|key, _| resource_links.contains_key(key));
+        self.mirror_usage_point_list.take_if(|mupl| {
+            mupl.href
+                .as_ref()
+                .is_none_or(|href| !resource_links.contains_key(href))
+        });
         // Note: we don't attempt to clear the end device list. It will be
         // overridden whenever a change occurs anyway.
 
@@ -594,6 +638,15 @@ impl Sep2Model {
                             .and_then(|edevl| edevl.poll_rate),
                     )
                 }))
+                .chain(dcap.mirror_usage_point_list_link.iter().map(|link| {
+                    resource_link(
+                        link.href.clone(),
+                        ResourceKind::MirrorUsagePointList,
+                        self.mirror_usage_point_list
+                            .as_ref()
+                            .and_then(|mupl| mupl.poll_rate),
+                    )
+                }))
         });
 
         // Note: this will emit a second edev list link. This is fine, duplicate
@@ -607,9 +660,19 @@ impl Sep2Model {
                 edl.poll_rate,
                 list_items(Some(edl), &self.end_devices),
                 |edev| {
+                    let der_list = edev.der_list_link.iter().map(|link| {
+                        resource_link(
+                            &link.href,
+                            ResourceKind::DERList,
+                            self.der_lists
+                                .get(&link.href)
+                                .and_then(|derl| derl.poll_rate),
+                        )
+                    });
                     edev.function_set_assignments_list_link
                         .iter()
                         .flat_map(|link| self.function_set_assignments_list_links(&link.href))
+                        .chain(der_list)
                         .collect()
                 },
             )
@@ -680,6 +743,23 @@ impl Sep2Model {
                 default_control.chain(controls).chain(curves).collect()
             },
         )
+    }
+
+    /// The pollRate of the DERList for the given EndDevice, if known. This is
+    /// also used as the post rate for DERSettings/DERStatus.
+    pub fn der_list_poll_rate(self: &Sep2Model, lfdi: HexBinary160) -> Option<u32> {
+        let link = self.end_devices.get(&lfdi)?.der_list_link.as_ref()?;
+        Some(self.der_lists.get(&link.href)?.poll_rate?.0)
+    }
+
+    /// The postRate of the MirrorUsagePoint for the given device, if known.
+    pub fn mirror_usage_point_post_rate(self: &Sep2Model, lfdi: HexBinary160) -> Option<u32> {
+        let mupl = self.mirror_usage_point_list.as_ref()?;
+        let mup = mupl
+            .mirror_usage_point
+            .iter()
+            .find(|mup| mup.device_lfdi == lfdi)?;
+        Some(mup.post_rate?.0)
     }
 
     /// Find an EndDevice. This is the entrypoint to the model state, from
@@ -1080,6 +1160,7 @@ mod tests {
         der::CurveData,
         edev::EndDeviceList,
         identification::{Link, ListLink},
+        metering_mirror::MirrorUsagePoint,
         objects::EventStatus,
         primitives::{Int32, Uint16},
         types::{DateTimeInterval, PowerOfTenMultiplierType, SFDIType},
@@ -1291,6 +1372,87 @@ mod tests {
             })
             .collect();
         assert_eq!(events, expected);
+    }
+
+    #[test]
+    fn post_rate_lists_are_polled_and_provide_rates() {
+        let mut model = Sep2Model::default();
+        let lfdi = mock_lfdi();
+
+        // The MirrorUsagePointList is linked from the dcap.
+        let events = model.apply_update(
+            DeviceCapability {
+                mirror_usage_point_list_link: Some(ListLink {
+                    href: String::from("/mup"),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+        assert_eq!(
+            events,
+            vec![Event::LinkAddedOrUpdated {
+                href: String::from("/mup"),
+                kind: ResourceKind::MirrorUsagePointList,
+                poll_rate: None,
+            }]
+        );
+
+        // The DERList is linked from the EndDevice.
+        let mut edevl = mock_edev_list(lfdi, mock_sfdi());
+        edevl.end_device[0].der_list_link = Some(ListLink {
+            href: String::from("/edev/1/der"),
+            ..Default::default()
+        });
+        let events = model.apply_update(edevl.into());
+        assert!(events.contains(&Event::LinkAddedOrUpdated {
+            href: String::from("/edev/1/der"),
+            kind: ResourceKind::DERList,
+            poll_rate: None,
+        }));
+
+        // Receiving the lists updates their poll rates and provides the post rates.
+        let events = model.apply_update(
+            MirrorUsagePointList {
+                href: Some(String::from("/mup")),
+                poll_rate: Some(Uint32(30)),
+                mirror_usage_point: vec![MirrorUsagePoint {
+                    device_lfdi: lfdi,
+                    post_rate: Some(Uint32(120)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .into(),
+        );
+        assert_eq!(
+            events,
+            vec![Event::LinkAddedOrUpdated {
+                href: String::from("/mup"),
+                kind: ResourceKind::MirrorUsagePointList,
+                poll_rate: Some(Uint32(30)),
+            }]
+        );
+        assert_eq!(model.mirror_usage_point_post_rate(lfdi), Some(120));
+
+        let events = model.apply_update(
+            DERList {
+                href: Some(String::from("/edev/1/der")),
+                poll_rate: Some(Uint32(45)),
+                ..Default::default()
+            }
+            .into(),
+        );
+        assert_eq!(
+            events,
+            vec![Event::LinkAddedOrUpdated {
+                href: String::from("/edev/1/der"),
+                kind: ResourceKind::DERList,
+                poll_rate: Some(Uint32(45)),
+            }]
+        );
+        assert_eq!(model.der_list_poll_rate(lfdi), Some(45));
     }
 
     #[test]

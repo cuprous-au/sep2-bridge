@@ -2,9 +2,10 @@ use async_broadcast::Sender as BroadcastSender;
 use sep2_client::client::{Client, PollCallback, PollHandle};
 use sep2_common::{
     packages::{
-        der::{DERControlList, DERCurveList, DERProgramList, DefaultDERControl},
+        der::{DERControlList, DERCurveList, DERList, DERProgramList, DefaultDERControl},
         edev::EndDeviceList,
         fsa::FunctionSetAssignmentsList,
+        metering_mirror::MirrorUsagePointList,
         primitives::Uint32,
         time::Time,
     },
@@ -59,7 +60,9 @@ pub async fn start_poll_for(
         | ResourceKind::FunctionSetAssignmentsList
         | ResourceKind::DERProgramList
         | ResourceKind::DERCurveList
-        | ResourceKind::DERControlList => &paginated_uri(href, max_list_size),
+        | ResourceKind::DERControlList
+        | ResourceKind::DERList
+        | ResourceKind::MirrorUsagePointList => &paginated_uri(href, max_list_size),
     };
     let handle = match kind {
         ResourceKind::Time => {
@@ -122,6 +125,24 @@ pub async fn start_poll_for(
                 kind_href,
                 poll_rate,
                 make_poll_callback::<DERCurveList>(broadcast),
+            )
+            .await
+        }
+        ResourceKind::DERList => {
+            get_then_poll(
+                client,
+                kind_href,
+                poll_rate,
+                make_poll_callback::<DERList>(broadcast),
+            )
+            .await
+        }
+        ResourceKind::MirrorUsagePointList => {
+            get_then_poll(
+                client,
+                kind_href,
+                poll_rate,
+                make_poll_callback::<MirrorUsagePointList>(broadcast),
             )
             .await
         }

@@ -2,15 +2,15 @@ use regex::regex;
 use std::{str::FromStr, time::Duration};
 
 use chrono::Utc;
-use sep2_bridge::{Result, sep2_connection};
+use sep2_bridge::{Result, scheduler::PostRates, sep2_connection};
 use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::{
     Pen,
     packages::{
         der::{ActivePower, DERCapability},
-        metering::ReadingType,
+        metering::{Reading, ReadingType},
         metering_mirror::MirrorMeterReading,
-        primitives::{HexBinary160, Int16},
+        primitives::{HexBinary160, Int16, Int48},
         types::{DeviceCategoryType, PowerOfTenMultiplierType, SFDIType, UomType},
     },
 };
@@ -19,7 +19,7 @@ use tokio::{
     task::{self, JoinHandle},
     time::{self, Instant},
 };
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate, matchers};
 
 // Generic timeout
 const TIMEOUT: Duration = Duration::from_secs(1);
@@ -308,9 +308,10 @@ async fn sends_metering_readings() {
     assert!(requests.iter().any(|r| r.url.path() == "/mup/2"));
 }
 
-/// Tests whether the meter readings will reuse an existing MRID
+/// Tests whether the meter readings will reuse an existing MRID. A post-rate
+/// check is done at the end of this test too.
 #[tokio::test]
-async fn reuses_existing_meter_mrid() {
+async fn reuses_existing_meter_mrid_and_responds_to_post_rate() {
     // Setup
     let (_task, mock, input_ch, mut output_ch) = setup().await;
 
@@ -363,8 +364,63 @@ async fn reuses_existing_meter_mrid() {
             .await
             .unwrap()
             .into_iter()
-            .inspect(|req| eprintln!("{:?}", req))
             .any(|req| String::from_utf8(req.body).unwrap().contains(mrid))
+    );
+
+    // Try to send another reading, this should not immediately post because of the post rate limits.
+    let metering = sep2_connection::Command::SendMeterReadings(vec![MirrorMeterReading {
+        reading_type: Some(ReadingType {
+            uom: Some(UomType::W),
+            ..Default::default()
+        }),
+        reading: Some(Reading {
+            value: Some(Int48(2)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }]);
+    input_ch.send(metering).await.expect("Send error");
+
+    // This is hard to confirm it doesn't get sent, but waiting for 1s should be
+    // sufficient for at least the commands to be processed. We also use this 1s
+    // to wait for the new post rate we are about to set.
+    let matches_new_reading = |req: Request| {
+        if req.url.path() != "/mup/2" {
+            return false;
+        }
+        let body = String::from_utf8(req.body).expect("Body is not UTF-8");
+        let mmr: MirrorMeterReading =
+            sep2_common::deserialize(&body).expect("Unable to deserialize body");
+        mmr.reading
+            .is_some_and(|reading| reading.value == Some(Int48(2)))
+    };
+
+    time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        !mock
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .any(matches_new_reading)
+    );
+
+    // Now set the post rate to 1s. This should immediately trigger the meter readings to be sent off.
+    input_ch
+        .send(sep2_connection::Command::UpdatePostRates(PostRates {
+            der: None,
+            mirror_usage_point: Some(1),
+        }))
+        .await
+        .expect("sending update post rates");
+
+    time::sleep(FLUSH_TIME).await;
+    assert!(
+        mock.received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .any(matches_new_reading)
     );
 }
 
