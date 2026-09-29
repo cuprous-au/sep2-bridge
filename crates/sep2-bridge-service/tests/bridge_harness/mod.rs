@@ -14,7 +14,12 @@ use sep2_client::{client::Client, device::SEDevice};
 use sep2_common::{
     Pen,
     packages::{
-        primitives::HexBinary160,
+        dcap::DeviceCapability,
+        der::{DER, DERList},
+        edev::{EndDevice, EndDeviceList},
+        identification::{Link, ListLink},
+        primitives::{HexBinary160, Int64, Uint32},
+        time::Time,
         types::{DeviceCategoryType, SFDIType},
     },
     traits::SEType,
@@ -24,9 +29,15 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 pub const MOCK_POLL_RATE: u32 = 1;
 
+pub const HREF_DCAP: &str = "/dcap";
+pub const HREF_TM: &str = "/tm";
 pub const HREF_EDEVL: &str = "/edev";
+pub const HREF_MUPL: &str = "/mup";
+pub const HREF_MUP: &str = "/mup/1";
 pub const HREF_EDEV: &str = "/edev/1";
 pub const HREF_FSAL: &str = "/edev/1/fsa";
+pub const HREF_DERL: &str = "/edev/1/der";
+pub const HREF_DER: &str = "/edev/1/der/1";
 pub const HREF_DERCAP: &str = "/edev/1/der/1/dercap";
 pub const HREF_DERG: &str = "/edev/1/der/1/derg";
 pub const HREF_DERS: &str = "/edev/1/der/1/ders";
@@ -69,7 +80,7 @@ pub async fn start_bridge(sunspec_addr: SocketAddr, sep2_mock: &MockServer) -> J
                 sep2_conn_input_tx,
                 sep2_connection::Sep2ConnectionArgs {
                     client,
-                    dcap_uri: String::from("/dcap"),
+                    dcap_uri: String::from(HREF_DCAP),
                     max_list_size: 30,
                     default_poll_rate: 1,
                     device_to_register: device,
@@ -151,54 +162,98 @@ pub async fn mock_resource<R: SEType>(mock: &MockServer, path: &str, resource: &
 }
 
 /// Mounts the endpoints the sep2_connection task always queries.
-pub async fn setup_base_mocks(mock: &MockServer) {
-    let lfdi = mock_lfdi();
-    let sfdi = mock_sfdi();
-    let now = Utc::now().timestamp();
+pub async fn setup_base_mocks(mock: &MockServer, include_mup_link: bool) {
+    let now = Int64(Utc::now().timestamp());
 
-    mock_get(mock, String::from("/dcap"),
-        format!(r#"<DeviceCapability xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/dcap" pollRate="{MOCK_POLL_RATE}">
-  <TimeLink href="/tm"/>
-  <EndDeviceListLink href="{HREF_EDEVL}" all="1"/>
-</DeviceCapability>"#))
-        .await;
+    mock_resource(
+        mock,
+        HREF_DCAP,
+        &DeviceCapability {
+            href: Some(HREF_DCAP.into()),
+            poll_rate: Some(Uint32(MOCK_POLL_RATE)),
+            time_link: Some(Link {
+                href: HREF_TM.into(),
+            }),
+            end_device_list_link: Some(ListLink {
+                href: HREF_EDEVL.into(),
+                all: Some(Uint32(1)),
+            }),
+            mirror_usage_point_list_link: include_mup_link.then_some(ListLink {
+                href: HREF_MUPL.into(),
+                all: Some(Uint32(1)),
+            }),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    mock_get(mock, String::from(HREF_EDEVL),
-        format!(r#"<EndDeviceList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="{HREF_EDEVL}" subscribable="1" all="1" results="1" pollRate="{MOCK_POLL_RATE}">
-  <EndDevice href="{HREF_EDEV}" subscribable="1">
-    <DERListLink href="/edev/1/der" all="1"/>
-    <deviceCategory>00</deviceCategory>
-    <lFDI>{lfdi}</lFDI>
-    <LogEventListLink href="/edev/1/lel"/>
-    <sFDI>{sfdi}</sFDI>
-    <changedTime>{now}</changedTime>
-    <enabled>true</enabled>
-    <FunctionSetAssignmentsListLink href="{HREF_FSAL}" all="1"/>
-    <RegistrationLink href="/edev/1/rg"/><csipaus:ConnectionPointLink href="/edev/1/cp"/>
-  </EndDevice>
-</EndDeviceList>"#))
-        .await;
+    mock_resource(
+        mock,
+        HREF_EDEVL,
+        &EndDeviceList {
+            href: Some(HREF_EDEVL.into()),
+            poll_rate: Some(Uint32(MOCK_POLL_RATE)),
+            end_device: vec![EndDevice {
+                href: Some(HREF_EDEV.into()),
+                der_list_link: Some(ListLink {
+                    href: HREF_DERL.into(),
+                    all: Some(Uint32(1)),
+                }),
+                device_category: Some(DeviceCategoryType::empty()),
+                lfdi: Some(mock_lfdi()),
+                sfdi: mock_sfdi(),
+                enabled: Some(true),
+                function_set_assignments_list_link: Some(ListLink {
+                    href: HREF_FSAL.into(),
+                    all: Some(Uint32(1)),
+                }),
+                ..Default::default()
+            }],
 
-    mock_get(mock, String::from("/tm"),
-        format!(r#"<Time xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/tm">
-  <currentTime>{now}</currentTime>
-  <dstEndTime>0</dstEndTime>
-  <dstOffset>0</dstOffset>
-  <dstStartTime>0</dstStartTime>
-  <quality>4</quality>
-  <tzOffset>0</tzOffset>
-</Time>"#))
-        .await;
+            all: Uint32(1),
+            results: Uint32(1),
 
-    mock_get(mock, String::from("/edev/1/der"),
-        format!(r#"<DERList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/edev/1/der" all="1" results="1" pollRate="{MOCK_POLL_RATE}">
-  <DER href="/edev/1/der/1">
-    <AssociatedDERProgramListLink href="/edev/1/der/1/derp"/>
-    <DERAvailabilityLink href="/edev/1/der/1/dera"/>
-    <DERCapabilityLink href="{HREF_DERCAP}"/>
-    <DERSettingsLink href="{HREF_DERG}"/>
-    <DERStatusLink href="{HREF_DERS}"/>
-  </DER>
-</DERList>"#))
-        .await;
+            ..Default::default()
+        },
+    )
+    .await;
+
+    mock_resource(
+        mock,
+        HREF_TM,
+        &Time {
+            href: Some(HREF_TM.into()),
+            current_time: now,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    mock_resource(
+        mock,
+        HREF_DERL,
+        &DERList {
+            href: Some(HREF_DERL.into()),
+            poll_rate: Some(Uint32(MOCK_POLL_RATE)),
+
+            der: vec![DER {
+                href: Some(HREF_DER.into()),
+                der_capability_link: Some(Link {
+                    href: HREF_DERCAP.into(),
+                }),
+                der_settings_link: Some(Link {
+                    href: HREF_DERG.into(),
+                }),
+                der_status_link: Some(Link {
+                    href: HREF_DERS.into(),
+                }),
+
+                ..Default::default()
+            }],
+
+            all: Uint32(1),
+            results: Uint32(1),
+        },
+    )
+    .await;
 }

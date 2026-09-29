@@ -5,18 +5,26 @@ mod modbus_server_mock;
 
 use std::time::Duration;
 
-use bridge_harness::{HREF_DERCAP, HREF_DERG, HREF_DERS, setup_base_mocks, start_bridge};
+use bridge_harness::{
+    HREF_DERCAP, HREF_DERG, HREF_DERS, HREF_MUP, HREF_MUPL, MOCK_POLL_RATE, mock_lfdi,
+    mock_resource, setup_base_mocks, start_bridge,
+};
 use modbus_server_mock::SunSpecMock;
 use sep2_bridge::Result;
 use sep2_common::{
     packages::{
         der::{
-            ActivePower, ApparentPower, ConnectStatusValue, DERCapability, DERControlType,
-            DERSettings, DERStatus, OperationalModeStatusValue, PowerFactor, ReactivePower,
-            ReactiveSusceptance, VoltageRMS,
+            ActivePower, ApparentPower, ConnectStatusValue, DERAlarmStatus, DERCapability,
+            DERControlType, DERSettings, DERStatus, OperationalModeStatusValue, PowerFactor,
+            ReactivePower, ReactiveSusceptance, VoltageRMS,
         },
-        primitives::{Int16, Uint16, Uint32},
-        types::{Percent, PowerOfTenMultiplierType},
+        metering::ReadingType,
+        metering_mirror::{MirrorMeterReading, MirrorUsagePoint, MirrorUsagePointList},
+        primitives::{Int16, Int48, Uint16, Uint32},
+        types::{
+            AccumulationBehaviourType, CommodityType, FlowDirectionType, KindType, MRIDType,
+            Percent, PhaseCode, PowerOfTenMultiplierType, UomType,
+        },
     },
     traits::SEType,
 };
@@ -82,7 +90,7 @@ const EXPECTED_MODES_SUPPORTED: DERControlType = DERControlType::OpModMaxLimW
     .union(DERControlType::OpModVoltVar);
 
 // DERSettings. All SEP2 SFs are hundredths.
-// The device mock sues V_SF=-1 and HZ_SF=-3.
+// The device mock uses V_SF=-1 and HZ_SF=-3.
 const DEVICE_ESV_HI: u16 = 1100; // 110.0%
 const DEVICE_ESV_LO: u16 = 880; // 88.0%
 const DEVICE_ES_HZ_HI: u32 = 50_150; // 50.150 Hz
@@ -102,6 +110,37 @@ const EXPECTED_SET_ES_RAMP_TMS: u32 = 30_000;
 // DERStatus
 const DEVICE_SOC: u16 = 755; // 75.5%
 const EXPECTED_STATE_OF_CHARGE: u16 = 7_550;
+// OverTemp has no SEP2 equivalent, so is dropped.
+const DEVICE_ALRM: model701::Alrm = model701::Alrm::AcOverVolt
+    .union(model701::Alrm::OverFrequency)
+    .union(model701::Alrm::OverTemp);
+const EXPECTED_ALARM_STATUS: DERAlarmStatus =
+    DERAlarmStatus::DER_FAULT_OVER_VOLTAGE.union(DERAlarmStatus::DER_FAULT_OVER_FREQUENCY);
+
+// MirrorMeterReading
+const MRID_POWER_READING: MRIDType = MRIDType(4321);
+const DEVICE_METER_W: i16 = 1234;
+const DEVICE_METER_W_SF: i16 = 1;
+const DEVICE_METER_WL1: i16 = 400;
+const DEVICE_METER_WL2: i16 = 410;
+const DEVICE_METER_WL3: i16 = 424;
+const DEVICE_METER_LLV: u16 = 4150;
+const DEVICE_METER_LNV: u16 = 2400;
+const DEVICE_METER_VL1L2: u16 = 4160;
+const DEVICE_METER_VL1: u16 = 2405;
+const DEVICE_METER_VL2L3: u16 = 4170;
+const DEVICE_METER_VL2: u16 = 2410;
+const DEVICE_METER_VL3L1: u16 = 4180;
+const DEVICE_METER_VL3: u16 = 2415;
+const DEVICE_METER_V_SF: i16 = -1;
+const DEVICE_METER_VAR: i16 = -350;
+const DEVICE_METER_VAR_SF: i16 = -2;
+const DEVICE_METER_HZ: u32 = 49_980;
+const DEVICE_METER_HZ_SF: i16 = -3;
+const EXPECTED_METER_W_MULTIPLIER: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Deca;
+const EXPECTED_METER_V_MULTIPLIER: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Deci;
+const EXPECTED_METER_VAR_MULTIPLIER: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Centi;
+const EXPECTED_METER_HZ_MULTIPLIER: PowerOfTenMultiplierType = PowerOfTenMultiplierType::Milli;
 
 /// Tests that model 702 reaches the server as a DERCapability.
 #[tokio::test]
@@ -265,17 +304,166 @@ async fn sends_der_status() {
         status.stor_connect_status.map(|status| status.value),
         Some(ConnectStatusValue::Connected)
     );
+    assert_eq!(status.alarm_status, Some(EXPECTED_ALARM_STATUS));
     assert_eq!(
         status.state_of_charge_status.map(|status| status.value),
         Percent::new(EXPECTED_STATE_OF_CHARGE)
     );
 }
 
+/// Tests that readings from model 701 reach the server as MirrorMeterReadings.
+#[tokio::test]
+async fn sends_meter_readings() {
+    let (_mock, sep2_mock, _tasks) = setup().await;
+
+    // We require some posts that end up on the MUP endpoint.
+    // Rather than waiting for a guaranteed settle time, we'll loop and eagerly
+    // try to identify a success.
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+
+    while Instant::now() < deadline {
+        time::sleep(POLL_INTERVAL).await;
+
+        let meter_readings: Vec<MirrorMeterReading> = sep2_mock
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|req| req.method == "POST" && req.url.path() == HREF_MUP)
+            .map(|req| {
+                let body = String::from_utf8(req.body.clone()).expect("Body is not UTF-8");
+                sep2_common::deserialize(&body).expect("Unable to deserialize body")
+            })
+            .collect();
+
+        // We expect to find a POST that matches the MRID that was already present in the sep2 mock.
+        let power_reading = meter_readings.iter().find(|reading| {
+            reading.mrid == MRID_POWER_READING
+                && reading.reading_type.as_ref().is_some_and(|typ| {
+                    typ.flow_direction == Some(FlowDirectionType::Reverse)
+                        && typ.phase.is_none()
+                        && typ.uom == Some(UomType::W)
+                })
+        });
+
+        // And we expect to find a POST for the other kinds of readings
+        let find_reading = |flow_direction, uom, phase: Option<PhaseCode>| {
+            meter_readings.iter().find(|reading| {
+                reading.reading_type.as_ref().is_some_and(|typ| {
+                    typ.flow_direction.as_ref() == Some(&flow_direction)
+                        && typ.phase.as_ref() == phase.as_ref()
+                        && typ.uom.as_ref() == Some(&uom)
+                })
+            })
+        };
+        let find_power = |phase| find_reading(FlowDirectionType::Reverse, UomType::W, Some(phase));
+        let find_voltage =
+            |phase| find_reading(FlowDirectionType::Forward, UomType::Voltage, Some(phase));
+
+        let expected = [
+            (
+                power_reading,
+                i64::from(DEVICE_METER_W),
+                EXPECTED_METER_W_MULTIPLIER,
+            ),
+            (
+                find_power(PhaseCode::PhaseA),
+                i64::from(DEVICE_METER_WL1),
+                EXPECTED_METER_W_MULTIPLIER,
+            ),
+            (
+                find_power(PhaseCode::PhaseB),
+                i64::from(DEVICE_METER_WL2),
+                EXPECTED_METER_W_MULTIPLIER,
+            ),
+            (
+                find_power(PhaseCode::PhaseC),
+                i64::from(DEVICE_METER_WL3),
+                EXPECTED_METER_W_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseABC),
+                i64::from(DEVICE_METER_LLV),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseAN),
+                i64::from(DEVICE_METER_LNV),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseAB),
+                i64::from(DEVICE_METER_VL1L2),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseA),
+                i64::from(DEVICE_METER_VL1),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseBC),
+                i64::from(DEVICE_METER_VL2L3),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseB),
+                i64::from(DEVICE_METER_VL2),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseCA),
+                i64::from(DEVICE_METER_VL3L1),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_voltage(PhaseCode::PhaseC),
+                i64::from(DEVICE_METER_VL3),
+                EXPECTED_METER_V_MULTIPLIER,
+            ),
+            (
+                find_reading(FlowDirectionType::Reverse, UomType::VAr, None),
+                i64::from(DEVICE_METER_VAR),
+                EXPECTED_METER_VAR_MULTIPLIER,
+            ),
+            (
+                find_reading(FlowDirectionType::Reverse, UomType::Hz, None),
+                i64::from(DEVICE_METER_HZ),
+                EXPECTED_METER_HZ_MULTIPLIER,
+            ),
+        ];
+
+        if expected.iter().all(|(reading, _, _)| reading.is_some()) {
+            for (reading, value, multiplier) in expected {
+                let reading = reading.unwrap();
+                assert_eq!(
+                    reading.reading.as_ref().and_then(|r| r.value),
+                    Some(Int48(value)),
+                    "{:?}",
+                    reading.description
+                );
+                assert_eq!(
+                    reading
+                        .reading_type
+                        .as_ref()
+                        .and_then(|typ| typ.power_of_ten_multiplier),
+                    Some(multiplier),
+                    "{:?}",
+                    reading.description
+                );
+            }
+            return;
+        }
+    }
+
+    panic!("Unable to get all reading types expected");
+}
+
 /////
 // Helpers
 
-/// Waits for a PUT to `path` on the SEP2 mock and returns the latest body
-/// received there as a deserialized resource.
+/// Waits for a PUT to `path` on the SEP2 mock and returns the
+/// latest body received there as a deserialized resource.
 async fn wait_for_put<R: SEType>(mock: &MockServer, path: &str) -> R {
     let deadline = Instant::now() + SETTLE_TIMEOUT;
 
@@ -287,7 +475,7 @@ async fn wait_for_put<R: SEType>(mock: &MockServer, path: &str) -> R {
         if let Some(request) = requests
             .iter()
             .rev()
-            .find(|req| req.method.as_str() == "PUT" && req.url.path() == path)
+            .find(|req| req.method == "PUT" && req.url.path() == path)
         {
             let body = String::from_utf8(request.body.clone()).expect("Body is not UTF-8");
             return sep2_common::deserialize(&body).expect("Unable to deserialize body");
@@ -313,13 +501,10 @@ async fn setup() -> (SunSpecMock, MockServer, JoinSet<Result<()>>) {
 
     // The mocked SEP2 server. All endpoints are mounted before the tasks start
     // so that no polling cycle has to elapse before they are seen.
-    //
-    // Note: the dcap has no MirrorUsagePointListLink, so sending the meter
-    // readings will fail and request a retry. This doesn't affect these tests,
-    // as the meter readings are always sent after the status and settings.
     let sep2_mock = MockServer::start().await;
-    setup_base_mocks(&sep2_mock).await;
+    setup_base_mocks(&sep2_mock, true).await;
     setup_der_mocks(&sep2_mock).await;
+    setup_readings_mocks(&sep2_mock).await;
 
     let join_set = start_bridge(sunspec_mock.addr.unwrap(), &sep2_mock).await;
 
@@ -372,10 +557,29 @@ fn seed_device_state(mock: &SunSpecMock) {
     // Models 701 and 713
     mock.set_value("model701::ST", Some(model701::St::On));
     mock.set_value("model701::CONN_ST", Some(model701::ConnSt::Connected));
+    mock.set_value("model701::ALRM", Some(DEVICE_ALRM));
     mock.set_value("model713::SOC", Some(DEVICE_SOC));
+    mock.set_value("model701::W", Some(DEVICE_METER_W));
+    mock.set_value("model701::W_SF", Some(DEVICE_METER_W_SF));
+    mock.set_value("model701::WL1", Some(DEVICE_METER_WL1));
+    mock.set_value("model701::WL2", Some(DEVICE_METER_WL2));
+    mock.set_value("model701::WL3", Some(DEVICE_METER_WL3));
+    mock.set_value("model701::LLV", Some(DEVICE_METER_LLV));
+    mock.set_value("model701::LNV", Some(DEVICE_METER_LNV));
+    mock.set_value("model701::VL1L2", Some(DEVICE_METER_VL1L2));
+    mock.set_value("model701::VL1", Some(DEVICE_METER_VL1));
+    mock.set_value("model701::VL2L3", Some(DEVICE_METER_VL2L3));
+    mock.set_value("model701::VL2", Some(DEVICE_METER_VL2));
+    mock.set_value("model701::VL3L1", Some(DEVICE_METER_VL3L1));
+    mock.set_value("model701::VL3", Some(DEVICE_METER_VL3));
+    mock.set_value("model701::V_SF", Some(DEVICE_METER_V_SF));
+    mock.set_value("model701::VAR", Some(DEVICE_METER_VAR));
+    mock.set_value("model701::VAR_SF", Some(DEVICE_METER_VAR_SF));
+    mock.set_value("model701::HZ", Some(DEVICE_METER_HZ));
+    mock.set_value("model701::HZ_SF", Some(DEVICE_METER_HZ_SF));
 }
 
-/// Mounts the DER endpoints the device state is PUT to.
+/// Mounts the DER endpoints the device state is PUT to (except for MirrorUsagePoint readings).
 async fn setup_der_mocks(mock: &MockServer) {
     for path in [HREF_DERCAP, HREF_DERG, HREF_DERS] {
         Mock::given(matchers::method("PUT"))
@@ -385,4 +589,50 @@ async fn setup_der_mocks(mock: &MockServer) {
             .mount(mock)
             .await;
     }
+}
+
+/// Mounts the MUP endpoints the device metrics are POSTed to.
+async fn setup_readings_mocks(mock: &MockServer) {
+    mock_resource(
+        mock,
+        HREF_MUPL,
+        &MirrorUsagePointList {
+            href: Some(HREF_MUPL.into()),
+            poll_rate: Some(Uint32(MOCK_POLL_RATE)),
+            mirror_usage_point: vec![MirrorUsagePoint {
+                href: Some(HREF_MUP.into()),
+                mrid: MRIDType(42),
+                device_lfdi: mock_lfdi(),
+                mirror_meter_reading: vec![MirrorMeterReading {
+                    mrid: MRID_POWER_READING,
+                    reading_type: Some(ReadingType {
+                        flow_direction: Some(FlowDirectionType::Reverse),
+                        uom: Some(UomType::W),
+                        phase: None,
+                        kind: Some(KindType::Power),
+                        accumulation_behaviour: Some(AccumulationBehaviourType::Instantaneous),
+                        commodity: Some(CommodityType::ElectricitySecondaryMetered),
+                        power_of_ten_multiplier: Some(EXPECTED_METER_W_MULTIPLIER),
+                        ..Default::default()
+                    }),
+
+                    ..Default::default()
+                }],
+
+                post_rate: Some(Uint32(60)),
+
+                ..Default::default()
+            }],
+            all: Uint32(1),
+            results: Uint32(1),
+        },
+    )
+    .await;
+
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path(HREF_MUP))
+        .respond_with(ResponseTemplate::new(204))
+        .named(HREF_MUP)
+        .mount(mock)
+        .await;
 }

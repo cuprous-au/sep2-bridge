@@ -355,12 +355,33 @@ pub fn add_model_701(
     Model701::W.fill_registers(registers, offset, Some(12500));
     locations.insert("model701::W".into(), location(Model701::W, offset));
     Model701::W_SF.fill_registers(registers, offset, Some(-1));
+    locations.insert("model701::W_SF".into(), location(Model701::W_SF, offset));
+    locations.insert("model701::WL1".into(), location(Model701::WL1, offset));
+    locations.insert("model701::WL2".into(), location(Model701::WL2, offset));
+    locations.insert("model701::WL3".into(), location(Model701::WL3, offset));
 
     Model701::VAR.fill_registers(registers, offset, Some(500));
+    locations.insert("model701::VAR".into(), location(Model701::VAR, offset));
     Model701::VAR_SF.fill_registers(registers, offset, Some(-1));
+    locations.insert(
+        "model701::VAR_SF".into(),
+        location(Model701::VAR_SF, offset),
+    );
+
+    locations.insert("model701::LLV".into(), location(Model701::LLV, offset));
+    locations.insert("model701::LNV".into(), location(Model701::LNV, offset));
+    locations.insert("model701::VL1L2".into(), location(Model701::VL1L2, offset));
+    locations.insert("model701::VL1".into(), location(Model701::VL1, offset));
+    locations.insert("model701::VL2L3".into(), location(Model701::VL2L3, offset));
+    locations.insert("model701::VL2".into(), location(Model701::VL2, offset));
+    locations.insert("model701::VL3L1".into(), location(Model701::VL3L1, offset));
+    locations.insert("model701::VL3".into(), location(Model701::VL3, offset));
+    locations.insert("model701::V_SF".into(), location(Model701::V_SF, offset));
 
     Model701::HZ.fill_registers(registers, offset, Some(6000));
+    locations.insert("model701::HZ".into(), location(Model701::HZ, offset));
     Model701::HZ_SF.fill_registers(registers, offset, Some(-2));
+    locations.insert("model701::HZ_SF".into(), location(Model701::HZ_SF, offset));
 
     Model701::PF.fill_registers(registers, offset, Some(995));
     Model701::PF_SF.fill_registers(registers, offset, Some(-3));
@@ -373,6 +394,7 @@ pub fn add_model_701(
         "model701::CONN_ST".into(),
         location(Model701::CONN_ST, offset),
     );
+    locations.insert("model701::ALRM".into(), location(Model701::ALRM, offset));
 
     offset + usize::from(Model701::LEN)
 }

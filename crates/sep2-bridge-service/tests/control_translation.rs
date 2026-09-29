@@ -542,7 +542,7 @@ async fn setup() -> (SunSpecMock, MockServer, JoinSet<Result<()>>) {
     // The mocked SEP2 server. All endpoints are mounted before the tasks start
     // so that no polling cycle has to elapse before they are seen.
     let sep2_mock = MockServer::start().await;
-    setup_base_mocks(&sep2_mock).await;
+    setup_base_mocks(&sep2_mock, false).await;
     setup_control_mocks(&sep2_mock).await;
 
     let join_set = start_bridge(sunspec_mock.addr.unwrap(), &sep2_mock).await;
