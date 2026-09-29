@@ -1,33 +1,27 @@
 // Tests the full path a control takes from the SEP2 server to the device.
 // Assertions are made against the mocked device's registers.
 
+mod bridge_harness;
 mod modbus_server_mock;
 
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 
+use bridge_harness::{HREF_FSAL, mock_resource, setup_base_mocks, start_bridge};
 use chrono::Utc;
 use modbus_server_mock::SunSpecMock;
-use sep2_bridge::{
-    Result, deactivated_broadcast, dispatch, modbus_connection, scheduler, sep2_connection,
-};
-use sep2_client::{client::Client, device::SEDevice};
-use sep2_common::{
-    Pen,
-    packages::{
-        der::{
-            CurveData, DERControl, DERControlBase, DERControlList, DERCurve, DERCurveList,
-            DERProgram, DERProgramList, DERUnitRefType, DefaultDERControl, FixedVar, FreqDroopType,
-            PowerFactorWithExcitation,
-        },
-        fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
-        identification::{Link, ListLink},
-        primitives::{HexBinary160, Int16, Int32, Int64, Uint16, Uint32},
-        types::{
-            DateTimeInterval, DeviceCategoryType, MRIDType, Percent, PowerOfTenMultiplierType,
-            PrimacyType, SFDIType, SignedPercent,
-        },
+use sep2_bridge::Result;
+use sep2_common::packages::{
+    der::{
+        CurveData, DERControl, DERControlBase, DERControlList, DERCurve, DERCurveList, DERProgram,
+        DERProgramList, DERUnitRefType, DefaultDERControl, FixedVar, FreqDroopType,
+        PowerFactorWithExcitation,
     },
-    traits::SEType,
+    fsa::{FunctionSetAssignments, FunctionSetAssignmentsList},
+    identification::{Link, ListLink},
+    primitives::{Int16, Int32, Int64, Uint16, Uint32},
+    types::{
+        DateTimeInterval, MRIDType, Percent, PowerOfTenMultiplierType, PrimacyType, SignedPercent,
+    },
 };
 use sunspec::{
     Group, Value,
@@ -36,11 +30,10 @@ use sunspec::{
     },
 };
 use tokio::{
-    sync::mpsc,
     task::JoinSet,
     time::{self, Instant},
 };
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+use wiremock::MockServer;
 
 // How long a value is given to travel from the SEP2 server to the device.
 // Because we setup the mocks before tasks are started, we avoid much of the
@@ -50,11 +43,6 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 // How often the device registers are re-read while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-const MOCK_POLL_RATE: u32 = 1;
-
-const HREF_EDEVL: &str = "/edev";
-const HREF_EDEV: &str = "/edev/1";
-const HREF_FSAL: &str = "/edev/1/fsa";
 const HREF_FSA: &str = "/edev/1/fsa/1";
 const HREF_DERPL: &str = "/edev/1/fsa/1/derp";
 const HREF_DERP: &str = "/edev/1/derp/1";
@@ -196,7 +184,7 @@ const EXPECTED_W_SET_PCT: i16 = -250;
 /// (AS5438 - Table 10)
 #[tokio::test]
 async fn applies_as5438_table_10() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     assert_register(&mock, "model703::ESV_HI", Some(EXPECTED_ESV_HI)).await;
     assert_register(&mock, "model703::ESV_LO", Some(EXPECTED_ESV_LO)).await;
@@ -219,7 +207,7 @@ async fn applies_as5438_table_10() {
 /// (AS5438 - Tables 11 and 12)
 #[tokio::test]
 async fn applies_as5438_tables_11_12() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     assert_register(
         &mock,
@@ -255,7 +243,7 @@ async fn applies_as5438_tables_11_12() {
 /// (AS5438 - Table 9)
 #[tokio::test]
 async fn applies_as5438_table_9() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     assert_register(&mock, "model711::CTL_2::DB_OF", EXPECTED_DB_OF).await;
     assert_register(&mock, "model711::CTL_2::DB_UF", EXPECTED_DB_UF).await;
@@ -281,7 +269,7 @@ async fn applies_as5438_table_9() {
 /// (AS5438 - Table 8)
 #[tokio::test]
 async fn applies_as5438_table_8() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     // LFRT
     // The requested curve should have been updated.
@@ -315,7 +303,7 @@ async fn applies_as5438_table_8() {
 /// (AS5438 - Table 7)
 #[tokio::test]
 async fn applies_as5438_table_7() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     // LVRT
     // The requested curve should have been updated.
@@ -364,7 +352,7 @@ async fn applies_as5438_table_7() {
 /// (AS5438 - Table 6)
 #[tokio::test]
 async fn applies_as5438_table_6() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     // The function is enabled
     assert_register(&mock, "model706::ENA", model706::Ena::Enabled).await;
@@ -393,7 +381,7 @@ async fn applies_as5438_table_6() {
 /// (AS5438 - Table 5)
 #[tokio::test]
 async fn applies_as5438_table_5() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     assert_register(
         &mock,
@@ -409,7 +397,7 @@ async fn applies_as5438_table_5() {
 /// (AS5438 - Table 4)
 #[tokio::test]
 async fn applies_as5438_table_4() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     // The function is enabled
     assert_register(&mock, "model705::ENA", model705::Ena::Enabled).await;
@@ -450,7 +438,7 @@ async fn applies_as5438_table_4() {
 /// (AS5438 - Table 3)
 #[tokio::test]
 async fn applies_as5438_table_3() {
-    let (mock, _sep2_mock, _tasks, _modbus_events) = setup().await;
+    let (mock, _sep2_mock, _tasks) = setup().await;
 
     // Inject power factors
     assert_register(
@@ -539,22 +527,9 @@ async fn assert_curve_data<TX, TY>(
     }
 }
 
-fn mock_lfdi() -> HexBinary160 {
-    HexBinary160::from_str("00112233").expect("Invalid LFDI")
-}
-
 /// Starts a mocked sunspec device, a mocked SEP2 server exposing one active
 /// control, and the full set of bridge tasks wiring the two together.
-async fn setup() -> (
-    SunSpecMock,
-    MockServer,
-    JoinSet<Result<()>>,
-    async_broadcast::Receiver<modbus_connection::Event>,
-) {
-    let lfdi = mock_lfdi();
-    let sfdi = SFDIType::new(42).expect("Invalid SFDI");
-    let device = SEDevice::new(lfdi, sfdi, DeviceCategoryType::empty());
-
+async fn setup() -> (SunSpecMock, MockServer, JoinSet<Result<()>>) {
     // The mocked modbus device.
     let mut sunspec_mock = SunSpecMock::new(None)
         .await
@@ -567,156 +542,12 @@ async fn setup() -> (
     // The mocked SEP2 server. All endpoints are mounted before the tasks start
     // so that no polling cycle has to elapse before they are seen.
     let sep2_mock = MockServer::start().await;
-    setup_base_mocks(&sep2_mock, lfdi, sfdi).await;
+    setup_base_mocks(&sep2_mock, false).await;
     setup_control_mocks(&sep2_mock).await;
 
-    let client = Client::new(
-        &format!("http://{}", sep2_mock.address()),
-        None,
-        Some(Duration::from_secs(1)),
-    )
-    .expect("Unable to create client");
+    let join_set = start_bridge(sunspec_mock.addr.unwrap(), &sep2_mock).await;
 
-    let mut join_set = JoinSet::new();
-
-    // Start the SEP2 connection management task.
-    let (sep2_conn_input_tx, sep2_conn_input_rx) = mpsc::channel(10);
-    let (sep2_conn_output_tx, sep2_conn_output_rx) = deactivated_broadcast(10);
-    join_set.spawn({
-        let sep2_conn_input_tx = sep2_conn_input_tx.clone();
-        async move {
-            sep2_connection::task(
-                sep2_conn_output_tx,
-                sep2_conn_input_rx,
-                sep2_conn_input_tx,
-                sep2_connection::Sep2ConnectionArgs {
-                    client,
-                    dcap_uri: String::from("/dcap"),
-                    max_list_size: 30,
-                    default_poll_rate: 1,
-                    device_to_register: device,
-                    expected_pin: None,
-                    pen: Pen::csipaus(42).expect("valid pen"),
-                },
-            )
-            .await
-        }
-    });
-
-    // Start the scheduler task.
-    let (scheduler_input_tx, scheduler_input_rx) = mpsc::channel(10);
-    let (scheduler_output_tx, scheduler_output_rx) = deactivated_broadcast(10);
-    join_set.spawn(scheduler::task(
-        scheduler_output_tx,
-        scheduler_input_rx,
-        scheduler_input_tx.clone(),
-        lfdi,
-        None,
-    ));
-
-    // Start the modbus task.
-    let (modbus_input_tx, modbus_input_rx) = mpsc::channel(10);
-    let (mut modbus_output_tx, modbus_output_rx) = async_broadcast::broadcast(10);
-    // Nothing is consuming from the output channel in these tests, so allow it to overflow.
-    modbus_output_tx.set_overflow(true);
-    join_set.spawn(modbus_connection::task(
-        modbus_output_tx,
-        modbus_input_rx,
-        modbus_connection::Transport::Tcp(sunspec_mock.addr.unwrap()),
-        1,
-    ));
-
-    // Dispatch sep2_conn events to the scheduler.
-    join_set.spawn(dispatch::resource_update_dispatcher(
-        sep2_conn_output_rx.activate_cloned(),
-        scheduler_input_tx.clone(),
-    ));
-
-    // Dispatch scheduler events.
-    join_set.spawn(dispatch::sep2_subscription_and_notification_dispatcher(
-        scheduler_output_rx.activate_cloned(),
-        sep2_conn_input_tx.clone(),
-    ));
-    join_set.spawn(dispatch::control_change_dispatcher(
-        scheduler_output_rx.activate_cloned(),
-        modbus_input_tx.clone(),
-    ));
-
-    // Wake up the sep2_connection task to begin its work. Because all mocks are
-    // in place already, this should speed through.
-    sep2_conn_input_tx
-        .send(sep2_connection::Command::Wake)
-        .await
-        .expect("Send error");
-
-    (sunspec_mock, sep2_mock, join_set, modbus_output_rx)
-}
-
-async fn mock_get(mock: &MockServer, path: String, body: String) {
-    Mock::given(matchers::method("GET"))
-        .and(matchers::path(path.clone()))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/sep+xml"))
-        .expect(1..)
-        .named(path)
-        .mount(mock)
-        .await;
-}
-
-/// Serialises a SEP2 resource and mounts it at the given path.
-async fn mock_resource<R: SEType>(mock: &MockServer, path: &str, resource: &R) {
-    let body = sep2_common::serialize(resource).expect("Unable to serialize resource");
-    mock_get(mock, String::from(path), body).await;
-}
-
-/// Mounts the endpoints the sep2_connection task always queries.
-async fn setup_base_mocks(mock: &MockServer, lfdi: HexBinary160, sfdi: SFDIType) {
-    let now = Utc::now().timestamp();
-
-    mock_get(mock, String::from("/dcap"),
-        format!(r#"<DeviceCapability xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/dcap" pollRate="{MOCK_POLL_RATE}">
-  <TimeLink href="/tm"/>
-  <EndDeviceListLink href="{HREF_EDEVL}" all="1"/>
-</DeviceCapability>"#))
-        .await;
-
-    mock_get(mock, String::from(HREF_EDEVL),
-        format!(r#"<EndDeviceList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="{HREF_EDEVL}" subscribable="1" all="1" results="1" pollRate="{MOCK_POLL_RATE}">
-  <EndDevice href="{HREF_EDEV}" subscribable="1">
-    <DERListLink href="/edev/1/der" all="1"/>
-    <deviceCategory>00</deviceCategory>
-    <lFDI>{lfdi}</lFDI>
-    <LogEventListLink href="/edev/1/lel"/>
-    <sFDI>{sfdi}</sFDI>
-    <changedTime>{now}</changedTime>
-    <enabled>true</enabled>
-    <FunctionSetAssignmentsListLink href="{HREF_FSAL}" all="1"/>
-    <RegistrationLink href="/edev/1/rg"/><csipaus:ConnectionPointLink href="/edev/1/cp"/>
-  </EndDevice>
-</EndDeviceList>"#))
-        .await;
-
-    mock_get(mock, String::from("/tm"),
-        format!(r#"<Time xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/tm">
-  <currentTime>{now}</currentTime>
-  <dstEndTime>0</dstEndTime>
-  <dstOffset>0</dstOffset>
-  <dstStartTime>0</dstStartTime>
-  <quality>4</quality>
-  <tzOffset>0</tzOffset>
-</Time>"#))
-        .await;
-
-    mock_get(mock, String::from("/edev/1/der"),
-        format!(r#"<DERList xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" href="/edev/1/der" all="1" results="1" pollRate="{MOCK_POLL_RATE}">
-  <DER href="/edev/1/der/1">
-    <AssociatedDERProgramListLink href="/edev/1/der/1/derp"/>
-    <DERAvailabilityLink href="/edev/1/der/1/dera"/>
-    <DERCapabilityLink href="/edev/1/der/1/dercap"/>
-    <DERSettingsLink href="/edev/1/der/1/derg"/>
-    <DERStatusLink href="/edev/1/der/1/ders"/>
-  </DER>
-</DERList>"#))
-        .await;
+    (sunspec_mock, sep2_mock, join_set)
 }
 
 /// Mounts the chain of resources leading from the EndDevice to a single active
