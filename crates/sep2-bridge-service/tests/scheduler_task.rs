@@ -94,6 +94,9 @@ async fn requests_polling() {
             scheduler::Event::DERControlStatusChanged { .. } => {
                 panic!("Unexpected DERControlStatusChanged");
             }
+            scheduler::Event::PostRatesChanged(_) => {
+                panic!("Unexpected PostRatesChanged");
+            }
         }
     }
 
@@ -554,6 +557,8 @@ fn resources_in_order<'a>(
         Sep2ResourceEvent::DefaultDERControl(_) => 4,
         Sep2ResourceEvent::DERControlList(_) => 4,
         Sep2ResourceEvent::DERCurveList(_) => 4,
+        Sep2ResourceEvent::MirrorUsagePointList(_) => 1,
+        Sep2ResourceEvent::DERList(_) => 2,
     });
 
     ordered

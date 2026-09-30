@@ -44,6 +44,8 @@ pub enum ResourceKind {
     DERControl,
     DERCurveList,
     DERCurve,
+    DERList,
+    MirrorUsagePointList,
 }
 
 pub fn deactivated_broadcast<T>(

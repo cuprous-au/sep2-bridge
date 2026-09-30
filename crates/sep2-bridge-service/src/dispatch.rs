@@ -64,6 +64,12 @@ pub async fn sep2_subscription_and_notification_dispatcher(
                     .await
                     .map_err(|_| Error::ChannelClosed)?;
             }
+            scheduler::Event::PostRatesChanged(post_rates) => {
+                sep2_conn_input
+                    .send(sep2_connection::Command::UpdatePostRates(post_rates))
+                    .await
+                    .map_err(|_| Error::ChannelClosed)?;
+            }
             scheduler::Event::ParametersChanged(_) => {
                 // Ignore changed parameters
             }
@@ -98,7 +104,8 @@ pub async fn control_change_dispatcher(
             }
             scheduler::Event::LinkAddedOrUpdated { .. }
             | scheduler::Event::LinkRemoved { .. }
-            | scheduler::Event::DERControlStatusChanged { .. } => {
+            | scheduler::Event::DERControlStatusChanged { .. }
+            | scheduler::Event::PostRatesChanged(_) => {
                 // Ignore these events
             }
         }

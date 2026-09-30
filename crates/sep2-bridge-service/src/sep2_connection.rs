@@ -36,7 +36,7 @@ use tokio::{
     time::{self, Instant},
 };
 
-use crate::{Error, ResourceKind, Result, metrics};
+use crate::{Error, ResourceKind, Result, metrics, scheduler::PostRates};
 
 mod polling;
 
@@ -58,6 +58,8 @@ pub enum Sep2ResourceEvent {
     DefaultDERControl(Arc<DefaultDERControl>),
     DERControlList(Arc<DERControlList>),
     DERCurveList(Arc<DERCurveList>),
+    DERList(Arc<DERList>),
+    MirrorUsagePointList(Arc<MirrorUsagePointList>),
 }
 
 impl From<DeviceCapability> for Sep2ResourceEvent {
@@ -95,6 +97,16 @@ impl From<DERCurveList> for Sep2ResourceEvent {
         Sep2ResourceEvent::DERCurveList(Arc::new(resource))
     }
 }
+impl From<DERList> for Sep2ResourceEvent {
+    fn from(resource: DERList) -> Self {
+        Sep2ResourceEvent::DERList(Arc::new(resource))
+    }
+}
+impl From<MirrorUsagePointList> for Sep2ResourceEvent {
+    fn from(resource: MirrorUsagePointList) -> Self {
+        Sep2ResourceEvent::MirrorUsagePointList(Arc::new(resource))
+    }
+}
 impl From<Time> for Sep2ResourceEvent {
     fn from(resource: Time) -> Self {
         Sep2ResourceEvent::Time(Arc::new(resource))
@@ -108,6 +120,7 @@ pub enum Command {
     SendDeviceSettings(DERSettings),
     SendControlResponse(ControlResponse),
     SendMeterReadings(Vec<MirrorMeterReading>),
+    UpdatePostRates(PostRates),
     /// The task should refetch the dcap entrypoint and reregister its device.
     /// Only sent on a change to the dcap, when we can't be sure the server
     /// hasn't reset its resources.
@@ -178,8 +191,10 @@ pub async fn task(
     let mut server_registration_info = None;
     let mut der_option = None;
 
-    const POST_RATE_GENERIC: Duration = Duration::from_secs(60);
+    const POST_RATE_GENERIC: Duration = Duration::from_secs(300);
     const POST_RATE_CAPABILITIES: Duration = Duration::from_hours(24);
+    let mut post_rate_der = POST_RATE_GENERIC;
+    let mut post_rate_mup = POST_RATE_GENERIC;
     // Queues for messages that we need to send or retry.
     // The choice of 30 is intended to be larger than the SEP2 maximum number of
     // controls of 24 with a bit of extra leeway. In practical usage this should
@@ -199,23 +214,23 @@ pub async fn task(
     let mut mirror_usage_point = None;
     let mut reading_mrid_cache = HashMap::new();
 
-    let mut retry_task_handle: Option<JoinHandle<_>> = None;
+    let mut retry_handle: Option<JoinHandle<_>> = None;
     let mut retry_requested: bool = false;
 
     // The polls set up with sep2_client, keyed by href, so that they can be
     // updated or cancelled later and aren't set up twice.
     let mut established_polls: HashMap<String, EstablishedPoll> = HashMap::new();
     // The dcap poll is a manual task rather than a sep2_client poll.
-    let mut dcap_poll_task: Option<JoinHandle<()>> = None;
+    let mut dcap_poll_handle: Option<JoinHandle<()>> = None;
 
     loop {
         // Spawn a retry task if needed.
         if retry_requested {
-            if retry_task_handle.is_none() {
-                retry_task_handle = Some(task::spawn(retry_task(input_ch_tx.clone())));
+            if retry_handle.is_none() {
+                retry_handle = Some(task::spawn(retry_task(input_ch_tx.clone())));
             }
         } else {
-            if let Some(handle) = retry_task_handle.take() {
+            if let Some(handle) = retry_handle.take() {
                 handle.abort();
                 if let Err(join_error) = handle.await
                     && !join_error.is_cancelled()
@@ -317,6 +332,20 @@ pub async fn task(
                     );
                 }
             }
+            Command::UpdatePostRates(post_rates) => {
+                let to_duration = |rate: Option<u32>| {
+                    rate.map_or(POST_RATE_GENERIC, |rate| {
+                        Duration::from_secs(u64::from(rate))
+                    })
+                };
+                post_rate_der = to_duration(post_rates.der);
+                post_rate_mup = to_duration(post_rates.mirror_usage_point);
+                log::debug!(
+                    "Post rates updated to {:?} for DERSettings/DERStatus and {:?} for MirrorUsagePoint",
+                    post_rate_der,
+                    post_rate_mup
+                );
+            }
             Command::ResetConnection => {
                 // Clear out anything that we knew from the last dcap:
                 dcap_option = None;
@@ -345,7 +374,7 @@ pub async fn task(
         // If a retry task is running, we shouldn't try sending new messages,
         // wait until it returns. The only exceptions are if the retry task woke
         // up us or we need to reset our connection.
-        if retry_task_handle.is_some() && !is_wake_command {
+        if retry_handle.is_some() && !is_wake_command {
             continue;
         }
 
@@ -359,8 +388,8 @@ pub async fn task(
             // Always stop any previous poll for the dcap. If we successfully
             // get a new dcap we will be replacing this old poll, if we fail
             // then we don't want to poll anyway.
-            if let Some(prior_poll) = dcap_poll_task.take() {
-                prior_poll.abort();
+            if let Some(handle) = dcap_poll_handle.take() {
+                handle.abort();
             }
 
             dcap_option = get_dcap(args.client.clone(), &args.dcap_uri).await;
@@ -372,7 +401,7 @@ pub async fn task(
                     .broadcast(dcap.clone().into())
                     .await
                     .map_err(|_| Error::ChannelClosed)?;
-                dcap_poll_task = Some(task::spawn(dcap_polling(
+                dcap_poll_handle = Some(task::spawn(dcap_polling(
                     args.client.clone(),
                     args.dcap_uri.clone(),
                     dcap.clone(),
@@ -460,7 +489,7 @@ pub async fn task(
 
         // Attempt to send new device settings if we have a valid link.
         if last_sent_device_settings
-            .is_none_or(|time| Instant::now().duration_since(time) > POST_RATE_GENERIC)
+            .is_none_or(|time| Instant::now().duration_since(time) > post_rate_der)
             && let (Some(device_settings), Some(link)) = (
                 latest_device_settings.as_ref(),
                 der.der_settings_link.as_ref(),
@@ -483,7 +512,7 @@ pub async fn task(
 
         // Attempt to send a new device status if we have a valid link
         if last_sent_device_status
-            .is_none_or(|time| Instant::now().duration_since(time) > POST_RATE_GENERIC)
+            .is_none_or(|time| Instant::now().duration_since(time) > post_rate_der)
             && let (Some(der_status), Some(link)) =
                 (latest_device_status.as_ref(), der.der_status_link.as_ref())
         {
@@ -527,7 +556,7 @@ pub async fn task(
         // Attempt to send meter readings.
         if let Some(readings) = &latest_meter_readings
             && last_sent_meter_readings
-                .is_none_or(|time| Instant::now().duration_since(time) > POST_RATE_GENERIC)
+                .is_none_or(|time| Instant::now().duration_since(time) > post_rate_mup)
         {
             if send_meter_readings(
                 &args,
@@ -554,11 +583,11 @@ pub async fn task(
     log::info!("Input channel closed, stopping SEP2 connection loop");
 
     // Cleanup tasks
-    if let Some(task) = dcap_poll_task.take() {
-        task.abort();
+    if let Some(handle) = dcap_poll_handle.take() {
+        handle.abort();
     }
-    if let Some(task) = retry_task_handle.take() {
-        task.abort();
+    if let Some(handle) = retry_handle.take() {
+        handle.abort();
     }
 
     Ok(())
