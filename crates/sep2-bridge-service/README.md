@@ -3,7 +3,7 @@ sep2-bridge-service
 
 The bridge service itself. For what it does, how to build it and how to run it, see
 the [top-level README](../../README.md). This file covers the crate's alignment with
-AS5438 and how to set up a local CSIP-AUS server to develop against.
+AS5438 and how to set up a local CSIP-AUS/SA TS 5573 server to develop against.
 
 ## Alignment with AS5438
 
@@ -32,7 +32,7 @@ register write it receives.
 ## Testing with envoy
 
 Envoy is a CSIP-AUS server developed by the BSGIP at ANU. We can use it here to
-test the sep2-bridge's CSIP-AUS client behaviour. To setup a test environment:
+test the sep2-bridge's upstream SEP2 client behaviour. To setup a test environment:
 
 1. First get envoy up and running. Clone it:
 ```

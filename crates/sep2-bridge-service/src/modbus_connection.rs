@@ -89,7 +89,7 @@ pub struct Parameters {
     pub der_trip_hv_mom_cess: Option<Curve<u16, u32>>,
 
     // AS5438 - Table E.8, Section E.4.6
-    // Note: CSIP does not define a mom_cess for lfrt and hfrt curves.
+    // Note: the AS5438 SEP2 profile does not define a mom_cess for lfrt and hfrt curves.
     pub der_trip_lf_must: Option<Curve<u32, u32>>,
     pub der_trip_lf_may: Option<Curve<u32, u32>>,
     pub der_trip_hf_must: Option<Curve<u32, u32>>,

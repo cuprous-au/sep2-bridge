@@ -4,13 +4,13 @@
 
 The AS5438 standard document (in draft as of 2026-08-31) describes the required
 parameters for an inverter system to be interoperable with the energy grid. It
-also provides explicit mappings for the CSIP-AUS, SunSpec Modbus and OCPP
-protocols for the set of parameters.
+also provides explicit mappings between its SEP2 profile (of AS 5385), SunSpec
+Modbus and OCPP protocols for the set of parameters.
 
-In this crate, these mappings are used to translate parameters from CSIP-AUS to
-SunSpec Modbus. However, some parameters are only loosely coupled and either require
-some additional parameters to be set, or a decision on how to apply the values. This
-file documents the choices made in this crate.
+In this crate, these mappings are used to translate parameters from the AS5438
+SEP2 profile to SunSpec Modbus. However, some parameters are only loosely
+coupled and either require some additional parameters to be set, or a decision
+on how to apply the values. This file documents the choices made in this crate.
 
 ## Scaling factors (Tables E.1-12)
 
@@ -74,7 +74,7 @@ assumed this is a typo and the curve applies only to model 706.
 
 These tables refer to only a subset of curve types. As it is trivial to extend
 to all curve types, we include "Must Trip", "May Trip" and "Momentary Cessation"
-for all models, when CSIP-AUS also defines that curve.
+for all models, when the upstream SEP2 profile also defines that curve.
 
 ## Table E.9 (Section E.4.7)
 
@@ -110,14 +110,14 @@ pedantic, these settings exist on the `DERControlBase` object which can be
 specified through either a `DERControl` or a `DefaultDERControl`. In this
 crate, the appropriate value is derived through layering a set of scheduled
 `DERControl`s and a set of `DefaultDERControl`s using the primacy ordering
-specified in the CSIP-AUS spec.
+specified in the upstream SEP2 profile specification in use.
 
 ## Table F.2 (Section F.3)
 
 The connection status is given two targets, `DERStatus::genConnectStatus` and
 `DERStatus::storConnectStatus`. While AS5438 describes these as parameters to be
-read, we are using them to report to the CSIP-AUS server which is out of scope
-for AS5438. We assign the measured value from SunSpec `701.ConnSt` to both
+read, we are using them to report to the upstream SEP2 server which is out of
+scope for AS5438. We assign the measured value from SunSpec `701.ConnSt` to both
 `DERStatus::genConnectStatus` and `DERStatus::storConnectStatus`.
 
 ## Extension parameters
