@@ -12,7 +12,7 @@ to the server.
 
 AS5438 defines a behind-the-meter SEP2 profile (of AS 5385) and separately
 defines parameter mappings to SunSpec Modbus. This bridge implements that
-AS5438 SEP2-profile-to-SunSpec transaction. CSIP-AUS (also known as SA
+AS5438 SEP2-profile-to-SunSpec translation. CSIP-AUS (also known as SA
 TS 5573:2025) is another AS 5385 profile and is supported where its wire-level
 requirements align with the AS5438 profile assumptions used here.
 

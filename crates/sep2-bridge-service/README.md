@@ -32,7 +32,7 @@ register write it receives.
 ## Testing with envoy
 
 Envoy is a CSIP-AUS server developed by the BSGIP at ANU. We can use it here to
-test the sep2-bridge's upstream SEP2 client behaviour. To setup a test environment:
+test the sep2-bridge's upstream SEP2 client behaviour. To set up a test environment:
 
 1. First get envoy up and running. Clone it:
 ```
