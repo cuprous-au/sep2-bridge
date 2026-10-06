@@ -4,7 +4,7 @@ A bridge service that translates IEEE 2030.5 (SEP2) messages to and from externa
 energy-system protocols and device interfaces.
 
 Specifically, this is a Linux-based service that acts as an upstream SEP2 client
-to receive DNSP site limits and apply them to an inverter or site controller
+to receive site-wide limits and apply them to an inverter or site controller
 over SunSpec Modbus, while sending that device's state and site meter data back
 to the server.
 
