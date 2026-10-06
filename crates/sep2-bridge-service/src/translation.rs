@@ -804,7 +804,8 @@ impl Convert<DERControlType> for Option<CtrlModes> {
                       | DERControlType::OpModHVRTMomentaryCessation
                     ),
                     CtrlModes::VoltWatt => Some(DERControlType::OpModVoltWatt),
-                    // Note that CSIP doesn't allow for a LFRT/HFRT Momentary Cessation.
+                    // Note that the AS5438 SEP2 profile doesn't allow for a LFRT/HFRT
+                    // Momentary Cessation.
                     CtrlModes::LfTrip => Some(
                         DERControlType::OpModLFRTMustTrip
                       | DERControlType::OpModLFRTMayTrip
@@ -818,7 +819,7 @@ impl Convert<DERControlType> for Option<CtrlModes> {
                     | CtrlModes::WattVar
                     // Scheduled is not something we expect from a device. But
                     // we don't need to convert it anyway - because we are
-                    // communicating with upstream via CSIP-AUS, that implicitly
+                    // communicating with an upstream SEP2 profile, that implicitly
                     // indicates we support scheduling.
                     | CtrlModes::Scheduled
                     // DynReactCurr is a difficult one to map, but it is

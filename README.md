@@ -3,14 +3,22 @@
 A bridge service that translates IEEE 2030.5 (SEP2) messages to and from external
 energy-system protocols and device interfaces.
 
-Specifically, this is a Linux-based service that acts as a CSIP-AUS client to
-receive DNSP site limits and apply them to an inverter or site controller over
-SunSpec Modbus, while sending that device's state and site meter data back to
-the CSIP-AUS server.
+Specifically, this is a Linux-based service that acts as an upstream SEP2 client
+to receive DNSP site limits and apply them to an inverter or site controller
+over SunSpec Modbus, while sending that device's state and site meter data back
+to the server.
+
+## Terminology
+
+AS5438 defines a behind-the-meter SEP2 profile (of AS 5385) and separately
+defines parameter mappings to SunSpec Modbus. This bridge implements that
+AS5438 SEP2-profile-to-SunSpec translation. CSIP-AUS (also known as SA
+TS 5573:2025) is another AS 5385 profile and is supported where its wire-level
+requirements align with the AS5438 profile assumptions used here.
 
 Traffic flows in both directions:
 
-- **Down (server to device).** Polls the CSIP-AUS server for assigned parameters
+- **Down (server to device).** Polls the upstream SEP2 server for assigned parameters
   in defaults and scheduled controls, layers them by primacy to work out which
   values apply right now, and writes the resulting parameters into the SunSpec
   Modbus device.
@@ -19,12 +27,12 @@ Traffic flows in both directions:
   responses acknowledging each control as it starts, ends, is cancelled or is
   superseded.
 
-This service acts as a client to both the CSIP-AUS server and the SunSpec Modbus
+This service acts as a client to both the upstream SEP2 server and the SunSpec Modbus
 device. The device side can use a TCP or a Unix socket connection (serial RTU
 will be supported in the future).
 
-The parameters translated between CSIP-AUS and the SunSpec protocols follow the
-mappings in the draft Australian Standards document AS5438. See
+The parameters translated between the AS5438 SEP2 profile and SunSpec follow
+the mappings in the draft Australian Standards document AS5438. See
 [AS5438_comments](crates/sep2-bridge-service/docs/AS5438_comments.md) for
 further information regarding the choices made in implementing that spec.
 
@@ -55,8 +63,8 @@ Note that TLS will not work out of the box on a current OpenSSL — see
 | `--credentials-directory` | *(required)*              | Directory holding `client.crt`, `client.key` and optionally `registration_pin`. The option name aligns with the systemd `$CREDENTIALS_DIRECTORY` convention. |
 | `--modbus-socket`         | *(required)*              | `tcp://<ip>[:<port>]` or `unix:///path/to.sock`              |
 | `--ca-path`               | `/etc/sep2-bridge/ca.crt` | CA certificate for server verification |
-| `--server-addr`           | `127.0.0.1:8080`          | The CSIP-AUS server address.                                                                            |
-| `--dcap-uri`              | `/dcap`                   | Path of the `DeviceCapability` entry point of the CSIP-AUS server                                         |
+| `--server-addr`           | `127.0.0.1:8080`          | The upstream SEP2 server address.                                                                        |
+| `--dcap-uri`              | `/dcap`                   | Path of the `DeviceCapability` entry point of the upstream SEP2 server                                   |
 | `--modbus-device-id`      | `1`                       | Modbus unit id, to distinguish devices sharing a connection                                               |
 | `--max-list-size`         | `30`                      | Pagination limit used when querying list resources. |
 | `--default-poll-rate`     | `900`                     | Seconds. Used only for resources where the server specifies no poll rate |
