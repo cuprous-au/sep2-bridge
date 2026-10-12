@@ -16,6 +16,13 @@ device, several other parameters not mentioned in AS5438 are also required. The
 details of the changes made to be compatible with AS5438 are described in
 [AS5438_comments](docs/AS5438_comments.md).
 
+### Build-time feature flags
+
+- `site-limits-to-wset`: enables build variants that map SEP2 site
+  import/export limits (`opModImpLimW`/`opModExpLimW`) to SunSpec model 704
+  `WSet` (Watts mode), for DER/EMS targets that internally manage uncontrolled
+  load.
+
 ## Mock SunSpec device
 
 The SunSpec Modbus mock used by the integration tests

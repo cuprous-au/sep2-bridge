@@ -30,3 +30,9 @@ proptest.workspace = true
 wiremock.workspace = true
 regex.workspace = true
 tokio-modbus = { workspace = true, features = ["tcp-server"] }
+
+[features]
+# enables build variants that map SEP2 site import/export limits
+# (`opModImpLimW`/`opModExpLimW`) to SunSpec model 704 `WSet` (Watts mode),
+# for DER/EMS targets that internally manage uncontrolled load.
+site-limits-to-wset = []
