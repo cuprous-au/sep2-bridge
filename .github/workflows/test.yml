@@ -21,8 +21,14 @@ jobs:
       run: |
         rustup toolchain install stable --profile minimal
     - uses: Swatinem/rust-cache@v2
-    - name: Format, lint and test
+    - name: Format
       run: |
         cargo fmt -- --check
+    - name: Lint and test (default features)
+      run: |
         cargo clippy --tests --verbose -- -D warnings
         cargo test --workspace --verbose
+    - name: Lint and test (site-limits-to-wset feature)
+      run: |
+        cargo clippy --tests --verbose --features site-limits-to-wset -- -D warnings
+        cargo test --workspace --verbose --features site-limits-to-wset
