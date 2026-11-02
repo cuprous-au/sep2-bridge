@@ -18,9 +18,9 @@ details of the changes made to be compatible with AS5438 are described in
 
 ### Build-time feature flags
 
-- `site-limits-to-wset`: enables build variants that map SEP2 site
+- `map-imp-exp-site-limits`: enables build variants that map SEP2 site
   import/export limits (`opModImpLimW`/`opModExpLimW`) to SunSpec model 704
-  `WSet` (Watts mode), for DER/EMS targets that internally manage uncontrolled
+  `WSetPct`/`WMaxLimPct` respectively, for DER/EMS targets that internally manage uncontrolled
   load.
 
 ## Mock SunSpec device
