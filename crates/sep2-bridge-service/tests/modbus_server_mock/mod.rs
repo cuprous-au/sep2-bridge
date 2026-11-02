@@ -501,7 +501,6 @@ pub fn add_model_702(
         "model702::REACT_SUSCEPT_RTG".into(),
         location(Model702::REACT_SUSCEPT_RTG, offset),
     );
-
     locations.insert("model702::W_SF".into(), location(Model702::W_SF, offset));
     locations.insert("model702::PF_SF".into(), location(Model702::PF_SF, offset));
     locations.insert("model702::VA_SF".into(), location(Model702::VA_SF, offset));
