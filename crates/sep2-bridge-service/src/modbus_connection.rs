@@ -39,6 +39,28 @@ pub enum Error {
 impl std::error::Error for Error {}
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ApplyStatus {
+    deferred: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PendingApply {
+    #[default]
+    None,
+    Model704LimitDerivations,
+}
+
+impl PendingApply {
+    fn from_apply_status(status: ApplyStatus) -> Self {
+        if status.deferred {
+            Self::Model704LimitDerivations
+        } else {
+            Self::None
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Event {
     // Model1 doesn't support Clone, so wrap it with an Arc to pass around a reference.
@@ -119,6 +141,10 @@ pub struct Parameters {
     pub w_set_ena: Option<model704::WSetEna>,
     pub w_set_mod: Option<model704::WSetMod>,
     pub w_set: Option<ScaledValue<i32>>,
+    // Extension - indicates w_set originated from an import site limit.
+    pub w_set_is_import_site_limit: bool,
+    // Extension - site export values can be conveyed
+    pub w_max_lim: Option<ScaledValue<u32>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +213,7 @@ pub async fn task(
     let mut device_opt: Option<AsyncDevice<TokioModbusContext>> = None;
     let mut parameters = None;
     let mut last_sent_parameters = None;
+    let mut pending_apply = PendingApply::None;
     let mut last_poll_time = Instant::now();
 
     loop {
@@ -229,25 +256,51 @@ pub async fn task(
                     // sent parameters to indicate we don't know what the device
                     // is set to and prompt this task to send the parameters again.
                     last_sent_parameters = None;
+                    pending_apply = PendingApply::None;
                 }
             }
         }
 
         // The jobs we need to do on every loop.
         if let Some(device) = &device_opt
-            && parameters != last_sent_parameters
             && let Some(parameters) = &parameters
         {
-            match time::timeout(COMM_TIMEOUT, send_new_parameters(device, parameters)).await {
-                Err(_) => {
-                    drop_connection(device_opt.take(), Error::CommunicationTimeout).await;
+            if last_sent_parameters.as_ref() != Some(parameters) {
+                match time::timeout(COMM_TIMEOUT, send_new_parameters(device, parameters)).await {
+                    Err(_) => {
+                        drop_connection(device_opt.take(), Error::CommunicationTimeout).await;
+                    }
+                    Ok(Err(err)) => {
+                        drop_connection(device_opt.take(), err).await;
+                    }
+                    Ok(Ok(status)) => {
+                        log::trace!("Sent new parameters: {:?}", parameters);
+                        last_sent_parameters = Some(parameters.clone());
+                        pending_apply = PendingApply::from_apply_status(status);
+                        if status.deferred {
+                            log::trace!(
+                                "Deferred model-704 limit derivations (will retry automatically): {:?}",
+                                parameters
+                            );
+                        }
+                    }
                 }
-                Ok(Err(err)) => {
-                    drop_connection(device_opt.take(), err).await;
-                }
-                Ok(Ok(_)) => {
-                    log::trace!("Sent new parameters: {:?}", parameters);
-                    last_sent_parameters = Some(parameters.clone());
+            } else if pending_apply == PendingApply::Model704LimitDerivations {
+                match time::timeout(
+                    COMM_TIMEOUT,
+                    send_model704_pending_limit_derivations(device, parameters, true),
+                )
+                .await
+                {
+                    Err(_) => {
+                        drop_connection(device_opt.take(), Error::CommunicationTimeout).await;
+                    }
+                    Ok(Err(err)) => {
+                        drop_connection(device_opt.take(), err).await;
+                    }
+                    Ok(Ok(status)) => {
+                        pending_apply = PendingApply::from_apply_status(status);
+                    }
                 }
             }
         }
@@ -622,9 +675,12 @@ async fn poll_device_state(
 async fn send_new_parameters(
     device: &AsyncDevice<TokioModbusContext>,
     parameters: &Parameters,
-) -> Result<()> {
+) -> Result<ApplyStatus> {
+    let mut status = ApplyStatus::default();
+
     send_model703_parameters(device, parameters).await?;
-    send_model704_parameters(device, parameters).await?;
+    let model704_status = send_model704_parameters(device, parameters).await?;
+    status.deferred |= model704_status.deferred;
     send_model705_parameters(device, parameters).await?;
     send_model706_parameters(device, parameters).await?;
     send_model707_parameters(device, parameters).await?;
@@ -633,7 +689,7 @@ async fn send_new_parameters(
     send_model710_parameters(device, parameters).await?;
     send_model711_parameters(device, parameters).await?;
 
-    Ok(())
+    Ok(status)
 }
 
 /// Conditionally writes only when the value is Some(_).
@@ -661,6 +717,117 @@ async fn write_rescaled_if_some<T: FixedSize + ScaledValueInner, M: Model>(
         value.map(|inner| inner.rescale(scale_factor).value),
     )
     .await
+}
+
+fn to_w_set_pct_from_w_set(
+    w_set: ScaledValue<i32>,
+    w_max_rtg: ScaledValue<u16>,
+    pct_sf: i16,
+    round_toward_zero: bool,
+) -> Option<ScaledValue<i16>> {
+    if w_max_rtg.value == 0 {
+        return None;
+    }
+
+    let w_set_pct = scaled_percent_raw(
+        i64::from(w_set.value),
+        w_set.sf,
+        i64::from(w_max_rtg.value),
+        w_max_rtg.sf,
+        pct_sf,
+        round_toward_zero,
+    )?;
+
+    Some(ScaledValue::new(
+        w_set_pct.clamp(i128::from(i16::MIN + 1), i128::from(i16::MAX)) as i16,
+        pct_sf,
+    ))
+}
+
+fn to_w_max_lim_pct_from_w_max_lim(
+    w_max_lim: ScaledValue<u32>,
+    w_max_rtg: ScaledValue<u16>,
+    pct_sf: i16,
+) -> Option<ScaledValue<u16>> {
+    if w_max_rtg.value == 0 {
+        return None;
+    }
+
+    let w_max_lim_pct = scaled_percent_raw(
+        i64::from(w_max_lim.value),
+        w_max_lim.sf,
+        i64::from(w_max_rtg.value),
+        w_max_rtg.sf,
+        pct_sf,
+        true,
+    )?;
+
+    Some(ScaledValue::new(
+        w_max_lim_pct.clamp(0, i128::from(u16::MAX - 1)) as u16,
+        pct_sf,
+    ))
+}
+
+fn scaled_percent_raw(
+    value: i64,
+    value_sf: i16,
+    rating: i64,
+    rating_sf: i16,
+    pct_sf: i16,
+    round_toward_zero: bool,
+) -> Option<i128> {
+    if rating <= 0 {
+        return None;
+    }
+
+    let exponent = i32::from(value_sf) - i32::from(rating_sf) - i32::from(pct_sf);
+    let base_numerator = i128::from(value).saturating_mul(100);
+    let base_denominator = i128::from(rating);
+    let factor = 10i128.saturating_pow(exponent.unsigned_abs());
+
+    if exponent >= 0 {
+        let scaled_numerator = base_numerator.saturating_mul(factor);
+        if round_toward_zero {
+            Some(div_round_toward_zero(scaled_numerator, base_denominator))
+        } else {
+            Some(div_round_half_away_from_zero(
+                scaled_numerator,
+                base_denominator,
+            ))
+        }
+    } else {
+        let scaled_denominator = base_denominator.saturating_mul(factor);
+        if round_toward_zero {
+            Some(div_round_toward_zero(base_numerator, scaled_denominator))
+        } else {
+            Some(div_round_half_away_from_zero(
+                base_numerator,
+                scaled_denominator,
+            ))
+        }
+    }
+}
+
+fn div_round_half_away_from_zero(numerator: i128, denominator: i128) -> i128 {
+    debug_assert!(denominator > 0);
+
+    let sign = if numerator.is_negative() { -1 } else { 1 };
+    let abs_numerator = numerator.saturating_abs();
+    let quotient = abs_numerator / denominator;
+    let remainder = abs_numerator % denominator;
+    let threshold = (denominator / 2) + (denominator % 2);
+    let rounded = if remainder >= threshold {
+        quotient.saturating_add(1)
+    } else {
+        quotient
+    };
+
+    if sign < 0 { -rounded } else { rounded }
+}
+
+fn div_round_toward_zero(numerator: i128, denominator: i128) -> i128 {
+    debug_assert!(denominator > 0);
+    numerator / denominator
 }
 
 /// A convenience tool for writing points that are part of repeating groups.
@@ -721,9 +888,9 @@ async fn send_model703_parameters(
 async fn send_model704_parameters(
     device: &AsyncDevice<TokioModbusContext>,
     parameters: &Parameters,
-) -> Result<()> {
+) -> Result<ApplyStatus> {
     if !device.models.supported_model_ids().contains(&704) {
-        return Ok(());
+        return Ok(ApplyStatus::default());
     }
 
     // AS5438 - Table E.3, Section E.4.1
@@ -799,41 +966,179 @@ async fn send_model704_parameters(
     }
     write_if_some(device, Model704::VAR_SET_MOD, parameters.var_set_mod).await?;
 
-    // AS5438 - Table E.11, Section E.4.9
-    write_if_some(
-        device,
-        Model704::W_MAX_LIM_PCT_ENA,
-        parameters.w_max_lim_pct_ena,
-    )
-    .await?;
-    if parameters.w_max_lim_pct.is_some() {
-        let pct_sf = device
-            .read_point(Model704::W_MAX_LIM_PCT_SF)
-            .await
-            .map_err(comm_err)?
-            .unwrap_or_default();
-        write_rescaled_if_some(
-            device,
-            Model704::W_MAX_LIM_PCT,
-            parameters.w_max_lim_pct,
-            pct_sf,
-        )
-        .await?;
+    let status = send_model704_pending_limit_derivations(device, parameters, false).await?;
+
+    Ok(status)
+}
+
+async fn send_model704_pending_limit_derivations(
+    device: &AsyncDevice<TokioModbusContext>,
+    parameters: &Parameters,
+    retry_only: bool,
+) -> Result<ApplyStatus> {
+    if !device.models.supported_model_ids().contains(&704) {
+        return Ok(ApplyStatus::default());
     }
 
-    // AS5438 - Table E.12, Section E.4.10
-    write_if_some(device, Model704::W_SET_ENA, parameters.w_set_ena).await?;
-    if parameters.w_set_pct.is_some() {
-        let pct_sf = device
-            .read_point(Model704::W_SET_PCT_SF)
+    let mut status = ApplyStatus::default();
+
+    let has_w_max_lim_pct = parameters.w_max_lim_pct.is_some();
+    let has_w_max_lim = parameters.w_max_lim.is_some();
+    let derive_w_max_lim_pct = has_w_max_lim;
+    let derive_w_max_lim_pct_from_site_only = !has_w_max_lim_pct && has_w_max_lim;
+
+    let has_w_set_pct = parameters.w_set_pct.is_some();
+    let has_w_set = parameters.w_set.is_some();
+    let derive_w_set_pct = !has_w_set_pct && has_w_set;
+
+    let needs_w_max_rtg = derive_w_max_lim_pct || derive_w_set_pct;
+    let w_max_rtg = if needs_w_max_rtg && device.models.supported_model_ids().contains(&702) {
+        if let Some(w_max_rtg) = device
+            .read_point(Model702::W_MAX_RTG)
             .await
             .map_err(comm_err)?
-            .unwrap_or_default();
-        write_rescaled_if_some(device, Model704::W_SET_PCT, parameters.w_set_pct, pct_sf).await?;
+        {
+            let w_sf = device
+                .read_point(Model702::W_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default();
+            Some(ScaledValue::new(w_max_rtg, w_sf))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // AS5438 - Table E.11, Section E.4.9
+    let w_max_lim_pct_sf = if has_w_max_lim_pct || (derive_w_max_lim_pct && w_max_rtg.is_some()) {
+        Some(
+            device
+                .read_point(Model704::W_MAX_LIM_PCT_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
+    let explicit_w_max_lim_pct =
+        if let (Some(w_max_lim_pct), Some(pct_sf)) = (parameters.w_max_lim_pct, w_max_lim_pct_sf) {
+            Some(w_max_lim_pct.rescale(pct_sf))
+        } else {
+            None
+        };
+    let derived_w_max_lim_pct = if let (Some(w_max_lim), Some(w_max_rtg), Some(pct_sf)) =
+        (parameters.w_max_lim, w_max_rtg, w_max_lim_pct_sf)
+    {
+        to_w_max_lim_pct_from_w_max_lim(w_max_lim, w_max_rtg, pct_sf)
+    } else {
+        None
+    };
+    let w_max_lim_pct = match (explicit_w_max_lim_pct, derived_w_max_lim_pct) {
+        (Some(explicit), Some(derived)) => {
+            if derived.value < explicit.value {
+                Some(derived)
+            } else {
+                Some(explicit)
+            }
+        }
+        (Some(explicit), None) => Some(explicit),
+        (None, Some(derived)) => Some(derived),
+        (None, None) => None,
+    };
+    let should_process_w_max_lim_pct = !retry_only || derive_w_max_lim_pct;
+    if should_process_w_max_lim_pct {
+        let w_max_lim_pct_derivation_pending =
+            derive_w_max_lim_pct && derived_w_max_lim_pct.is_none();
+        if w_max_lim_pct_derivation_pending {
+            // Leave existing protection untouched when we cannot derive an export
+            // percentage yet (for example, while capacity is unavailable), and
+            // retry later.
+            status.deferred = true;
+        } else {
+            let w_max_lim_pct_ena = match (parameters.w_max_lim_pct_ena, w_max_lim_pct) {
+                (Some(model704::WMaxLimPctEna::Disabled), Some(_))
+                    if derive_w_max_lim_pct_from_site_only =>
+                {
+                    Some(model704::WMaxLimPctEna::Enabled)
+                }
+                (Some(ena), _) => Some(ena),
+                (None, Some(_)) => Some(model704::WMaxLimPctEna::Enabled),
+                (None, None) => None,
+            };
+            write_if_some(device, Model704::W_MAX_LIM_PCT_ENA, w_max_lim_pct_ena).await?;
+            if let Some(pct_sf) = w_max_lim_pct_sf {
+                write_rescaled_if_some(device, Model704::W_MAX_LIM_PCT, w_max_lim_pct, pct_sf)
+                    .await?;
+            }
+        }
     }
-    // Extension: also write WSet if available and write WSetMod to indicate
-    // which is chosen.
-    if parameters.w_set.is_some() {
+    // AS5438 - Table E.12, Section E.4.10
+    let w_set_pct_sf = if has_w_set_pct || (derive_w_set_pct && w_max_rtg.is_some()) {
+        Some(
+            device
+                .read_point(Model704::W_SET_PCT_SF)
+                .await
+                .map_err(comm_err)?
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
+    let w_set_pct = if let Some(w_set_pct) = parameters.w_set_pct {
+        Some(w_set_pct)
+    } else if let (Some(w_set), Some(w_max_rtg), Some(pct_sf)) =
+        (parameters.w_set, w_max_rtg, w_set_pct_sf)
+    {
+        to_w_set_pct_from_w_set(
+            w_set,
+            w_max_rtg,
+            pct_sf,
+            parameters.w_set_is_import_site_limit,
+        )
+    } else {
+        None
+    };
+    let w_set_pct_derivation_pending = derive_w_set_pct && w_set_pct.is_none();
+    let import_site_limit_derivation_pending =
+        parameters.w_set_is_import_site_limit && w_set_pct_derivation_pending;
+    let should_process_w_set_controls = !retry_only || derive_w_set_pct;
+    if w_set_pct_derivation_pending {
+        status.deferred = true;
+    }
+    if should_process_w_set_controls {
+        if import_site_limit_derivation_pending {
+            // For import-site-limit controls, if percentage derivation is not yet
+            // possible (for example, no capacity), keep mode/enable state
+            // unchanged and retry later.
+            // Explicit target-w controls still write their watts path while the
+            // percentage register is pending.
+        } else {
+            let write_w_set_ena = !retry_only || parameters.w_set_is_import_site_limit;
+            if write_w_set_ena {
+                write_if_some(device, Model704::W_SET_ENA, parameters.w_set_ena).await?;
+            }
+            if let Some(pct_sf) = w_set_pct_sf {
+                write_rescaled_if_some(device, Model704::W_SET_PCT, w_set_pct, pct_sf).await?;
+            }
+        }
+    }
+    let import_site_limit_uses_pct = parameters.w_set_is_import_site_limit && w_set_pct.is_some();
+    let w_set_mod = if import_site_limit_uses_pct {
+        Some(model704::WSetMod::WMaxPct)
+    } else {
+        parameters.w_set_mod
+    };
+    // If an import-site-limit setpoint has been mapped successfully to WSetPct,
+    // skip the optional watts write to avoid failures on devices that reject
+    // W_SET while still supporting percentage controls.
+    if has_w_set
+        && !retry_only
+        && !import_site_limit_uses_pct
+        && !import_site_limit_derivation_pending
+    {
         let w_set_sf = device
             .read_point(Model704::W_SET_SF)
             .await
@@ -841,9 +1146,14 @@ async fn send_model704_parameters(
             .unwrap_or_default();
         write_rescaled_if_some(device, Model704::W_SET, parameters.w_set, w_set_sf).await?;
     }
-    write_if_some(device, Model704::W_SET_MOD, parameters.w_set_mod).await?;
+    if should_process_w_set_controls
+        && !import_site_limit_derivation_pending
+        && (!retry_only || parameters.w_set_is_import_site_limit)
+    {
+        write_if_some(device, Model704::W_SET_MOD, w_set_mod).await?;
+    }
 
-    Ok(())
+    Ok(status)
 }
 
 async fn send_model705_parameters(
@@ -1592,4 +1902,140 @@ impl VoltCurveModel<u16, i16> for Model706 {
     const CRV_ACT_PT: Point<Self::GCrv, u16> = model706::Crv::ACT_PT;
     const X_PT: Point<Self::GPt, Option<u16>> = model706::Pt::V;
     const Y_PT: Point<Self::GPt, Option<i16>> = model706::Pt::W;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_w_set_pct_from_w_set() {
+        assert_eq!(
+            to_w_set_pct_from_w_set(
+                ScaledValue::new(-250, 0),
+                ScaledValue::new(1000, 0),
+                -2,
+                false
+            ),
+            Some(ScaledValue::new(-2500, -2))
+        );
+    }
+
+    #[test]
+    fn derives_w_max_lim_pct_from_w_max_lim() {
+        assert_eq!(
+            to_w_max_lim_pct_from_w_max_lim(
+                ScaledValue::new(800, 0),
+                ScaledValue::new(1000, 0),
+                -2
+            ),
+            Some(ScaledValue::new(8000, -2))
+        );
+    }
+
+    #[test]
+    fn derives_w_set_pct_directly_at_target_sf() {
+        assert_eq!(
+            to_w_set_pct_from_w_set(
+                ScaledValue::new(-13349, 0),
+                ScaledValue::new(30000, 0),
+                0,
+                false
+            ),
+            Some(ScaledValue::new(-44, 0))
+        );
+    }
+
+    #[test]
+    fn derives_w_max_lim_pct_directly_at_target_sf() {
+        assert_eq!(
+            to_w_max_lim_pct_from_w_max_lim(
+                ScaledValue::new(13349, 0),
+                ScaledValue::new(30000, 0),
+                0
+            ),
+            Some(ScaledValue::new(44, 0))
+        );
+    }
+
+    #[test]
+    fn rounds_w_set_half_step_away_from_zero() {
+        assert_eq!(
+            to_w_set_pct_from_w_set(ScaledValue::new(-29, 0), ScaledValue::new(200, 0), 0, false),
+            Some(ScaledValue::new(-15, 0))
+        );
+        assert_eq!(
+            to_w_set_pct_from_w_set(ScaledValue::new(29, 0), ScaledValue::new(200, 0), 0, false),
+            Some(ScaledValue::new(15, 0))
+        );
+    }
+
+    #[test]
+    fn rounds_w_max_lim_half_step_toward_zero() {
+        assert_eq!(
+            to_w_max_lim_pct_from_w_max_lim(ScaledValue::new(29, 0), ScaledValue::new(200, 0), 0),
+            Some(ScaledValue::new(14, 0))
+        );
+    }
+
+    #[test]
+    fn rounds_import_site_limit_w_set_half_step_toward_zero() {
+        assert_eq!(
+            to_w_set_pct_from_w_set(ScaledValue::new(-29, 0), ScaledValue::new(200, 0), 0, true),
+            Some(ScaledValue::new(-14, 0))
+        );
+        assert_eq!(
+            to_w_set_pct_from_w_set(ScaledValue::new(-6, 0), ScaledValue::new(1000, 0), 0, true),
+            Some(ScaledValue::new(0, 0))
+        );
+    }
+
+    #[test]
+    fn derives_import_site_limit_w_set_pct_with_nonzero_mismatched_watt_scale_factors() {
+        assert_eq!(
+            to_w_set_pct_from_w_set(ScaledValue::new(-125, -1), ScaledValue::new(5, 1), -2, true),
+            Some(ScaledValue::new(-2500, -2))
+        );
+    }
+
+    #[test]
+    fn rounds_explicit_target_w_set_to_nearest() {
+        assert_eq!(
+            to_w_set_pct_from_w_set(ScaledValue::new(-6, 0), ScaledValue::new(1000, 0), 0, false),
+            Some(ScaledValue::new(-1, 0))
+        );
+    }
+
+    #[test]
+    fn derives_export_limit_w_max_lim_pct_with_nonzero_mismatched_watt_scale_factors() {
+        assert_eq!(
+            to_w_max_lim_pct_from_w_max_lim(ScaledValue::new(375, -1), ScaledValue::new(15, 1), -2),
+            Some(ScaledValue::new(2500, -2))
+        );
+    }
+
+    #[test]
+    fn derived_w_set_pct_avoids_sunspec_not_implemented_sentinel() {
+        assert_eq!(
+            to_w_set_pct_from_w_set(
+                ScaledValue::new(-4000, 0),
+                ScaledValue::new(1000, 0),
+                -2,
+                false
+            ),
+            Some(ScaledValue::new(i16::MIN + 1, -2))
+        );
+    }
+
+    #[test]
+    fn derived_w_max_lim_pct_avoids_sunspec_not_implemented_sentinel() {
+        assert_eq!(
+            to_w_max_lim_pct_from_w_max_lim(
+                ScaledValue::new(8000, 0),
+                ScaledValue::new(1000, 0),
+                -2
+            ),
+            Some(ScaledValue::new(u16::MAX - 1, -2))
+        );
+    }
 }

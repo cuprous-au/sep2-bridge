@@ -7,7 +7,7 @@ use sep2_bridge::{
     Result, ScaledValue,
     modbus_connection::{self, Capabilities, Metering, Model711Ctl, Settings, Status, Transport},
 };
-use sunspec::models::{model701, model703, model711};
+use sunspec::models::{model701, model703, model704, model711};
 use tokio::{
     sync::mpsc,
     task::{self, JoinHandle},
@@ -108,6 +108,625 @@ async fn rescales_parameters_to_device_scale_factors() {
         model711::Ena::Enabled
     );
     assert_eq!(mock.get_value::<u16>("model711::ADPT_CTL_REQ"), 2);
+}
+
+#[tokio::test]
+async fn enables_derived_w_max_lim_pct() {
+    let (mock, _task, input_ch, _output_ch) = setup(None).await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                // With mock W_MAX_RTG of 1000W and W_MAX_LIM_PCT_SF of 0.
+                // Also emulate translation's export-only output.
+                w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Disabled),
+                w_max_lim: Some(ScaledValue::new(800, 0)),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(80)
+    );
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Enabled
+    );
+}
+
+#[tokio::test]
+async fn import_site_limit_derived_w_set_pct_uses_wmaxpct_mode() {
+    let (mock, _task, input_ch, _output_ch) = setup(None).await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: true,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::WMaxPct
+    );
+    assert_eq!(mock.get_value::<Option<i32>>("model704::W_SET"), None);
+}
+
+#[tokio::test]
+async fn import_site_limit_supplied_w_set_pct_also_skips_w_set() {
+    let (mock, _task, input_ch, _output_ch) = setup(None).await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set_pct: Some(ScaledValue::new(-25, 0)),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: true,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::WMaxPct
+    );
+    assert_eq!(mock.get_value::<Option<i32>>("model704::W_SET"), None);
+}
+
+#[tokio::test]
+async fn explicit_target_w_keeps_watts_mode() {
+    let (mock, _task, input_ch, _output_ch) = setup(None).await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: false,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::Watts
+    );
+    assert!(mock.get_value::<Option<i32>>("model704::W_SET").is_some());
+}
+
+#[tokio::test]
+async fn import_site_limit_w_set_derivation_defers_without_capacity_and_retries() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+        mock.set_value::<model704::WSetEna>("model704::W_SET_ENA", model704::WSetEna::Disabled);
+        mock.set_value::<Option<model704::WSetMod>>("model704::W_SET_MOD", None);
+        mock.set_value::<Option<i32>>("model704::W_SET", None);
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                // Emulate translation output for import site limit controls.
+                w_set_ena: Some(model704::WSetEna::Enabled),
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: true,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Without capacity, leave mode/enable unchanged and avoid watts fallback.
+    assert_eq!(
+        mock.get_value::<model704::WSetEna>("model704::W_SET_ENA"),
+        model704::WSetEna::Disabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<model704::WSetMod>>("model704::W_SET_MOD"),
+        None
+    );
+    assert_eq!(mock.get_value::<Option<i32>>("model704::W_SET"), None);
+
+    // Once capacity is available, the pending request should retry and apply.
+    mock.set_value::<Option<u16>>("model702::W_MAX_RTG", Some(1000));
+    time::sleep(WAIT_POLL_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WSetEna>("model704::W_SET_ENA"),
+        model704::WSetEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::WMaxPct
+    );
+    assert_eq!(mock.get_value::<Option<i32>>("model704::W_SET"), None);
+    assert_eq!(
+        mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
+        Some(-250)
+    );
+}
+
+#[tokio::test]
+async fn explicit_target_w_set_derivation_defers_and_retries_pct_when_capacity_appears() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+        mock.set_value::<Option<i16>>("model704::W_SET_PCT", Some(12));
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_set_ena: Some(model704::WSetEna::Enabled),
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: false,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Watts path applies immediately for explicit targets.
+    assert_eq!(
+        mock.get_value::<model704::WSetEna>("model704::W_SET_ENA"),
+        model704::WSetEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::Watts
+    );
+    assert!(mock.get_value::<Option<i32>>("model704::W_SET").is_some());
+    // Percentage remains pending while capacity is unavailable.
+    assert_eq!(
+        mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
+        Some(12)
+    );
+
+    // Once capacity is available, the same pending request should
+    // automatically retry and apply WSetPct.
+    mock.set_value::<Option<u16>>("model702::W_MAX_RTG", Some(1000));
+    time::sleep(WAIT_POLL_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
+        Some(-250)
+    );
+}
+
+#[tokio::test]
+async fn explicit_target_pending_retry_does_not_rewrite_watts_controls() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_set_ena: Some(model704::WSetEna::Enabled),
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: false,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Simulate an external change while WSetPct derivation remains pending.
+    mock.set_value::<model704::WSetEna>("model704::W_SET_ENA", model704::WSetEna::Disabled);
+    mock.set_value::<Option<model704::WSetMod>>(
+        "model704::W_SET_MOD",
+        Some(model704::WSetMod::WMaxPct),
+    );
+    mock.set_value::<Option<i32>>("model704::W_SET", Some(1234));
+
+    // Pending retries should only target derivation-dependent writes.
+    time::sleep(WAIT_POLL_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WSetEna>("model704::W_SET_ENA"),
+        model704::WSetEna::Disabled
+    );
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::WMaxPct
+    );
+    assert_eq!(mock.get_value::<Option<i32>>("model704::W_SET"), Some(1234));
+}
+
+#[tokio::test]
+async fn explicit_target_pending_retry_does_not_rewrite_export_controls() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_set_ena: Some(model704::WSetEna::Enabled),
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                // Explicit export controls are present but not pending derivation.
+                w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Enabled),
+                w_max_lim_pct: Some(ScaledValue::new(8000, -2)),
+                w_set_is_import_site_limit: false,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Simulate external change while only WSetPct derivation remains pending.
+    mock.set_value::<model704::WMaxLimPctEna>(
+        "model704::W_MAX_LIM_PCT_ENA",
+        model704::WMaxLimPctEna::Disabled,
+    );
+    mock.set_value::<Option<u16>>("model704::W_MAX_LIM_PCT", Some(42));
+
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // Retry loop should not rewrite non-pending export controls.
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Disabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(42)
+    );
+}
+
+#[tokio::test]
+async fn export_pending_retry_does_not_rewrite_supplied_w_set_pct_controls() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_set_ena: Some(model704::WSetEna::Enabled),
+                // import-site-limit requests force WMaxPct mode when pct is present
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set_pct: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: true,
+                // export-site-limit derivation remains pending without capacity
+                w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Disabled),
+                w_max_lim: Some(ScaledValue::new(800, 0)),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Simulate external changes while only export derivation is pending.
+    mock.set_value::<model704::WSetEna>("model704::W_SET_ENA", model704::WSetEna::Disabled);
+    mock.set_value::<model704::WSetMod>("model704::W_SET_MOD", model704::WSetMod::Watts);
+    mock.set_value::<Option<i16>>("model704::W_SET_PCT", Some(12));
+
+    time::sleep(WAIT_POLL_TIME).await;
+
+    // Retry loop should not rewrite W-set controls when WSetPct derivation is not pending.
+    assert_eq!(
+        mock.get_value::<model704::WSetEna>("model704::W_SET_ENA"),
+        model704::WSetEna::Disabled
+    );
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::Watts
+    );
+    assert_eq!(
+        mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
+        Some(12)
+    );
+}
+
+#[tokio::test]
+async fn deferred_update_does_not_block_reapply_of_prior_parameters() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+    })
+    .await;
+
+    let params_a = modbus_connection::Parameters {
+        es: Some(model703::Es::Disabled),
+        ..Default::default()
+    };
+    let params_b = modbus_connection::Parameters {
+        es: Some(model703::Es::Enabled),
+        // Emulate translation output for export-only extension.
+        w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Disabled),
+        w_max_lim: Some(ScaledValue::new(800, 0)),
+        ..Default::default()
+    };
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            params_a.clone(),
+        ))
+        .await
+        .expect("Send error");
+    time::sleep(WAIT_TIME).await;
+    assert_eq!(
+        mock.get_value::<model703::Es>("model703::ES"),
+        model703::Es::Disabled
+    );
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(params_b))
+        .await
+        .expect("Send error");
+    time::sleep(WAIT_TIME).await;
+    assert_eq!(
+        mock.get_value::<model703::Es>("model703::ES"),
+        model703::Es::Enabled
+    );
+
+    // Re-sending A must not be skipped, even though it previously matched the
+    // last fully-applied parameters before the deferred update.
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(params_a))
+        .await
+        .expect("Send error");
+    time::sleep(WAIT_TIME).await;
+    assert_eq!(
+        mock.get_value::<model703::Es>("model703::ES"),
+        model703::Es::Disabled
+    );
+}
+
+#[tokio::test]
+async fn export_limit_derivation_defers_without_capacity_and_retries() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+        mock.set_value::<Option<u16>>("model704::W_MAX_LIM_PCT", Some(42));
+        mock.set_value::<model704::WMaxLimPctEna>(
+            "model704::W_MAX_LIM_PCT_ENA",
+            model704::WMaxLimPctEna::Enabled,
+        );
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                // Emulate translation output for export-only extension.
+                w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Disabled),
+                w_max_lim: Some(ScaledValue::new(800, 0)),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Without capacity, the write should be deferred and existing protection
+    // left unchanged.
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(42)
+    );
+
+    // Once capacity is available, the same pending parameters should
+    // automatically retry and apply.
+    mock.set_value::<Option<u16>>("model702::W_MAX_RTG", Some(1000));
+    time::sleep(WAIT_POLL_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(80)
+    );
+}
+
+#[tokio::test]
+async fn export_limit_uses_more_restrictive_of_explicit_and_site_limits() {
+    let (mock, _task, input_ch, _output_ch) = setup(None).await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Enabled),
+                // 80% explicit.
+                w_max_lim_pct: Some(ScaledValue::new(8000, -2)),
+                // 100W on 1000W rating => 10% derived, which is more restrictive.
+                w_max_lim: Some(ScaledValue::new(100, 0)),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(10)
+    );
+}
+
+#[cfg(feature = "map-imp-exp-site-limits")]
+#[tokio::test]
+async fn import_export_site_limits_derive_independently_and_recover_with_capacity() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+        // Seed prior control state to verify deferred retries preserve it.
+        mock.set_value::<model704::WSetEna>("model704::W_SET_ENA", model704::WSetEna::Disabled);
+        mock.set_value::<model704::WSetMod>("model704::W_SET_MOD", model704::WSetMod::Watts);
+        mock.set_value::<Option<i16>>("model704::W_SET_PCT", Some(12));
+        mock.set_value::<Option<i32>>("model704::W_SET", Some(777));
+        mock.set_value::<model704::WMaxLimPctEna>(
+            "model704::W_MAX_LIM_PCT_ENA",
+            model704::WMaxLimPctEna::Enabled,
+        );
+        mock.set_value::<Option<u16>>("model704::W_MAX_LIM_PCT", Some(42));
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                // Emulate feature-enabled translation output carrying both
+                // import and export site limits in one request.
+                w_set_ena: Some(model704::WSetEna::Enabled),
+                w_set_mod: Some(model704::WSetMod::Watts),
+                w_set: Some(ScaledValue::new(-250, 0)),
+                w_set_is_import_site_limit: true,
+                w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Disabled),
+                w_max_lim: Some(ScaledValue::new(800, 0)),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Without capacity, both derivations defer and existing controls remain unchanged.
+    assert_eq!(
+        mock.get_value::<model704::WSetEna>("model704::W_SET_ENA"),
+        model704::WSetEna::Disabled
+    );
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::Watts
+    );
+    assert_eq!(
+        mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
+        Some(12)
+    );
+    assert_eq!(mock.get_value::<Option<i32>>("model704::W_SET"), Some(777));
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(42)
+    );
+
+    // Once capacity appears, both pending percentages should be applied.
+    mock.set_value::<Option<u16>>("model702::W_MAX_RTG", Some(1000));
+    time::sleep(WAIT_POLL_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<model704::WSetEna>("model704::W_SET_ENA"),
+        model704::WSetEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<model704::WSetMod>("model704::W_SET_MOD"),
+        model704::WSetMod::WMaxPct
+    );
+    assert_eq!(
+        mock.get_value::<Option<i16>>("model704::W_SET_PCT"),
+        Some(-250)
+    );
+    // Import-site-limit percentage mode should not rewrite optional watts register.
+    assert_eq!(mock.get_value::<Option<i32>>("model704::W_SET"), Some(777));
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(80)
+    );
+}
+
+#[tokio::test]
+async fn export_limit_with_explicit_and_site_defers_when_capacity_unavailable() {
+    let (mock, _task, input_ch, _output_ch) = setup_with(None, |mock| {
+        mock.set_value::<Option<u16>>("model702::W_MAX_RTG", None);
+        mock.set_value::<Option<u16>>("model704::W_MAX_LIM_PCT", Some(42));
+        mock.set_value::<model704::WMaxLimPctEna>(
+            "model704::W_MAX_LIM_PCT_ENA",
+            model704::WMaxLimPctEna::Enabled,
+        );
+    })
+    .await;
+
+    input_ch
+        .send(modbus_connection::Command::UpdateParameters(
+            modbus_connection::Parameters {
+                w_max_lim_pct_ena: Some(model704::WMaxLimPctEna::Enabled),
+                // Explicit 80%, but site limit should still be considered once capacity appears.
+                w_max_lim_pct: Some(ScaledValue::new(8000, -2)),
+                w_max_lim: Some(ScaledValue::new(100, 0)),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("Send error");
+
+    time::sleep(WAIT_TIME).await;
+
+    // Leave existing protection unchanged while site-derived percentage cannot be computed.
+    assert_eq!(
+        mock.get_value::<model704::WMaxLimPctEna>("model704::W_MAX_LIM_PCT_ENA"),
+        model704::WMaxLimPctEna::Enabled
+    );
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(42)
+    );
+
+    // Once capacity appears, apply the tighter site-derived limit.
+    mock.set_value::<Option<u16>>("model702::W_MAX_RTG", Some(1000));
+    time::sleep(WAIT_POLL_TIME).await;
+
+    assert_eq!(
+        mock.get_value::<Option<u16>>("model704::W_MAX_LIM_PCT"),
+        Some(10)
+    );
 }
 
 /// Tests that a device which doesn't implement a scale factor register is

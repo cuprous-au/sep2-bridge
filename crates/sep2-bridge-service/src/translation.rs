@@ -347,8 +347,11 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
             .op_mod_target_w
             .clone()
             .convert();
-        let site_limit_w = direct_site_limit_to_w_set(&attrs.inner.der_control_base);
-        let effective_target_w = target_w.or(site_limit_w);
+        let site_limit_w = import_site_limit_to_wset(&attrs.inner.der_control_base);
+        let w_set_is_import_site_limit = target_w.is_none() && site_limit_w.is_some();
+        let w_set = target_w.or(site_limit_w);
+
+        let w_max_lim = export_site_limit_to_wmaxlim(&attrs.inner.der_control_base);
 
         let get_curve_data = |link: DERCurveLink| attrs.curves.get(&link.href).cloned();
 
@@ -601,6 +604,8 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
                 .map(hundredths_to_seconds),
 
             // AS5438 - Table F.11 to E.11
+            // For extension-derived export limits (w_max_lim), enablement is
+            // decided later at write time where capacity availability is known.
             w_max_lim_pct_ena: attrs
                 .inner
                 .der_control_base
@@ -615,57 +620,62 @@ impl TryFrom<ControlAttributes> for ModbusParameters {
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
 
             // AS5438 - Table F.12 to E.12
-            w_set_ena: (fixed_w.is_some() || effective_target_w.is_some()).convert(),
+            w_set_ena: (fixed_w.is_some() || w_set.is_some()).convert(),
             w_set_pct: attrs
                 .inner
                 .der_control_base
                 .op_mod_fixed_w
                 .convert()
                 .map(|val| ScaledValue::new(val, SEP2_HUNDREDTHS_SF)),
-            w_set: effective_target_w,
+            w_set,
+            w_set_is_import_site_limit,
             // Also set WSetMod conditionally. If both WSet and WSetPct are
             // available this is likely a mistake from upstream, however default
             // to WSetPct as that is the specified in the AS5438 spec.
-            w_set_mod: match (fixed_w, effective_target_w) {
+            w_set_mod: match (fixed_w, w_set) {
                 (None, None) => None,
                 (Some(_), None) => Some(model704::WSetMod::WMaxPct),
                 (None, Some(_)) => Some(model704::WSetMod::Watts),
                 (Some(_), Some(_)) => Some(model704::WSetMod::WMaxPct),
             },
+
+            // Extension
+            w_max_lim,
         })
     }
 }
 
-#[cfg(feature = "site-limits-to-wset")]
-fn direct_site_limit_to_w_set(
+#[cfg(feature = "map-imp-exp-site-limits")]
+fn import_site_limit_to_wset(
     base: &sep2_common::packages::der::DERControlBase,
 ) -> Option<ScaledValue<i32>> {
-    let normalize_directional = |active_power: ActivePower, import: bool| {
+    base.op_mod_imp_lim_w.clone().map(|active_power| {
         let w_set: ScaledValue<i32> = active_power.convert();
-        ScaledValue::new(
-            if import {
-                -w_set.value.abs()
-            } else {
-                w_set.value.abs()
-            },
-            w_set.sf,
-        )
-    };
-
-    base.op_mod_imp_lim_w
-        .clone()
-        .map(|active_power| normalize_directional(active_power, true))
-        .or_else(|| {
-            base.op_mod_exp_lim_w
-                .clone()
-                .map(|active_power| normalize_directional(active_power, false))
-        })
+        ScaledValue::new(-w_set.value.abs(), w_set.sf)
+    })
 }
 
-#[cfg(not(feature = "site-limits-to-wset"))]
-fn direct_site_limit_to_w_set(
+#[cfg(not(feature = "map-imp-exp-site-limits"))]
+fn import_site_limit_to_wset(
     _base: &sep2_common::packages::der::DERControlBase,
 ) -> Option<ScaledValue<i32>> {
+    None
+}
+
+#[cfg(feature = "map-imp-exp-site-limits")]
+fn export_site_limit_to_wmaxlim(
+    base: &sep2_common::packages::der::DERControlBase,
+) -> Option<ScaledValue<u32>> {
+    base.op_mod_exp_lim_w.clone().map(|active_power| {
+        let w_max_lim: ScaledValue<i32> = active_power.convert();
+        ScaledValue::new(w_max_lim.value.unsigned_abs(), w_max_lim.sf)
+    })
+}
+
+#[cfg(not(feature = "map-imp-exp-site-limits"))]
+fn export_site_limit_to_wmaxlim(
+    _base: &sep2_common::packages::der::DERControlBase,
+) -> Option<ScaledValue<u32>> {
     None
 }
 
@@ -1543,7 +1553,7 @@ mod tests {
         assert_eq!(result.w_set_pct, Some(ScaledValue::new(-2500, -2)));
     }
 
-    #[cfg(feature = "site-limits-to-wset")]
+    #[cfg(feature = "map-imp-exp-site-limits")]
     #[test]
     fn import_export_limits_map_to_w_set() {
         let parameters = ControlAttributes {
@@ -1564,12 +1574,13 @@ mod tests {
 
         assert_eq!(result.w_set_ena, Some(model704::WSetEna::Enabled));
         assert_eq!(result.w_set, Some(ScaledValue::new(-42, 0)));
+        assert!(result.w_set_is_import_site_limit);
         assert_eq!(result.w_set_mod, Some(model704::WSetMod::Watts));
     }
 
-    #[cfg(feature = "site-limits-to-wset")]
+    #[cfg(feature = "map-imp-exp-site-limits")]
     #[test]
-    fn export_limit_maps_to_positive_w_set() {
+    fn export_limit_maps_to_positive_w_max_lim() {
         let parameters = ControlAttributes {
             inner: DefaultDERControl {
                 der_control_base: DERControlBase {
@@ -1586,12 +1597,48 @@ mod tests {
 
         let result: ModbusParameters = parameters.try_into().expect("Translation failed");
 
-        assert_eq!(result.w_set_ena, Some(model704::WSetEna::Enabled));
-        assert_eq!(result.w_set, Some(ScaledValue::new(17, 1)));
-        assert_eq!(result.w_set_mod, Some(model704::WSetMod::Watts));
+        assert_eq!(
+            result.w_max_lim_pct_ena,
+            Some(model704::WMaxLimPctEna::Disabled)
+        );
+        assert_eq!(result.w_max_lim, Some(ScaledValue::new(17, 1)));
     }
 
-    #[cfg(feature = "site-limits-to-wset")]
+    #[cfg(feature = "map-imp-exp-site-limits")]
+    #[test]
+    fn import_export_site_limits_translate_independently_in_same_request() {
+        let parameters = ControlAttributes {
+            inner: DefaultDERControl {
+                der_control_base: DERControlBase {
+                    op_mod_imp_lim_w: Some(ActivePower {
+                        value: Int16(42),
+                        multiplier: PowerOfTenMultiplierType::None,
+                    }),
+                    op_mod_exp_lim_w: Some(ActivePower {
+                        value: Int16(-17),
+                        multiplier: PowerOfTenMultiplierType::Deca,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result: ModbusParameters = parameters.try_into().expect("Translation failed");
+
+        assert_eq!(result.w_set_ena, Some(model704::WSetEna::Enabled));
+        assert_eq!(result.w_set, Some(ScaledValue::new(-42, 0)));
+        assert!(result.w_set_is_import_site_limit);
+        assert_eq!(result.w_set_mod, Some(model704::WSetMod::Watts));
+        assert_eq!(
+            result.w_max_lim_pct_ena,
+            Some(model704::WMaxLimPctEna::Disabled)
+        );
+        assert_eq!(result.w_max_lim, Some(ScaledValue::new(17, 1)));
+    }
+
+    #[cfg(feature = "map-imp-exp-site-limits")]
     #[test]
     fn import_export_limits_preserve_i16_min_magnitude() {
         let import_parameters = ControlAttributes {
@@ -1628,10 +1675,10 @@ mod tests {
 
         let export_result: ModbusParameters =
             export_parameters.try_into().expect("Translation failed");
-        assert_eq!(export_result.w_set, Some(ScaledValue::new(32768, 0)));
+        assert_eq!(export_result.w_max_lim, Some(ScaledValue::new(32768, 0)));
     }
 
-    #[cfg(not(feature = "site-limits-to-wset"))]
+    #[cfg(not(feature = "map-imp-exp-site-limits"))]
     #[test]
     fn import_export_limits_do_not_map_without_feature() {
         let parameters = ControlAttributes {
@@ -1678,6 +1725,7 @@ mod tests {
         let result: ModbusParameters = parameters.try_into().expect("Translation failed");
 
         assert_eq!(result.w_set, Some(ScaledValue::new(11, 3)));
+        assert!(!result.w_set_is_import_site_limit);
         assert_eq!(result.w_set_mod, Some(model704::WSetMod::Watts));
     }
 

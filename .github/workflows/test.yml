@@ -28,7 +28,7 @@ jobs:
       run: |
         cargo clippy --tests --verbose -- -D warnings
         cargo test --workspace --verbose
-    - name: Lint and test (site-limits-to-wset feature)
+    - name: Lint and test (map-imp-exp-site-limits feature)
       run: |
-        cargo clippy --tests --verbose --features site-limits-to-wset -- -D warnings
-        cargo test --workspace --verbose --features site-limits-to-wset
+        cargo clippy --tests --verbose --features map-imp-exp-site-limits -- -D warnings
+        cargo test --workspace --verbose --features map-imp-exp-site-limits
